@@ -282,6 +282,31 @@ zod, sonner toasts.
   consumed by the manager for both modes.
 - `components/account/account-nav.tsx` — sidebar nav with active-link
   highlighting via `usePathname()`.
+- `app/(site)/products/[id]/page.tsx` — `/products/[id]` Product Detail
+  Page. Server-rendered via `getProductByIdOrSlug`; route accepts either
+  the UUID or the slug. Renders the breadcrumb, image gallery (with
+  merch + stock badges layered over the active image), title block with
+  rating + review count, price (compare-at strikethrough + discount %),
+  attribute list (SKU, size, material, color, category), description,
+  and the related-products carousel.
+- `components/products/product-gallery.tsx` — keyboard-accessible
+  thumbnail-strip + main-image gallery with arrow-key navigation and a
+  "n / total" counter overlay.
+- `components/products/product-actions.tsx` — quantity stepper +
+  Add to Cart + Add to Wishlist controls. Signed-in shoppers hit
+  `/api/cart` and `/api/wishlist` directly; guests get the
+  `<SignInPromptDialog>` instead. Stock-aware error handling maps
+  409 `out_of_stock` / `exceeds_stock` and 400 `exceeds_max_quantity`
+  to inline toasts.
+- `components/products/related-products.tsx` — horizontal "you may
+  also like" carousel using native scroll-snap with chevron controls
+  on desktop. Reuses `ProductCard` for each tile.
+- `components/products/sign-in-prompt-dialog.tsx` — modal that opens
+  for guests when they click an auth-gated PDP action; links to
+  `/login?next=` and `/register?next=` so the round-trip drops the
+  shopper back on the PDP.
+- `components/ui/dialog.tsx` — shadcn-style dialog primitive backed by
+  `@radix-ui/react-dialog`.
 
 ### Cross-tab session state
 
