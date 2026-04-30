@@ -3,7 +3,7 @@
 import * as React from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Boxes, Package, Tag } from "lucide-react";
+import { Boxes, Package, ShoppingBag, Tag } from "lucide-react";
 
 import { cn } from "@/lib/client/utils";
 
@@ -22,6 +22,7 @@ interface AdminNavItem {
 const NAV_ITEMS: ReadonlyArray<AdminNavItem> = [
   { href: "/admin/products", label: "Products", icon: Package },
   { href: "/admin/inventory", label: "Inventory", icon: Boxes },
+  { href: "/admin/orders", label: "Orders", icon: ShoppingBag },
   { href: "/admin/discounts", label: "Discounts", icon: Tag },
 ];
 
