@@ -19,6 +19,19 @@ import { sql } from "drizzle-orm";
  * - `email` is the canonical login identifier and must be unique.
  * - `passwordHash` stores a bcrypt hash; never the plaintext password.
  * - `role` defaults to "user". Other valid values: "admin".
+ *
+ * Account-disable snapshot (added by the admin users API,
+ * migration `0011_admin_users.sql`):
+ *
+ *   - `disabledAt`     when an admin pressed disable. NULL ⇒ enabled.
+ *   - `disabledReason` free-form admin note (optional).
+ *   - `disabledBy`     the admin's `users.id`. `set null` on delete so
+ *                      removing an admin user does not erase the audit
+ *                      trail on the affected accounts.
+ *
+ * The `getSessionUser()` helper short-circuits when `disabledAt` is set,
+ * so a disabled account cannot continue to use a session that was issued
+ * before the admin pressed disable.
  */
 export const users = pgTable(
   "users",
@@ -28,6 +41,11 @@ export const users = pgTable(
     passwordHash: text("password_hash").notNull(),
     name: varchar("name", { length: 200 }),
     role: varchar("role", { length: 32 }).notNull().default("user"),
+    disabledAt: timestamp("disabled_at", { withTimezone: true }),
+    disabledReason: text("disabled_reason"),
+    disabledBy: uuid("disabled_by").references((): AnyPgColumn => users.id, {
+      onDelete: "set null",
+    }),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
@@ -37,6 +55,7 @@ export const users = pgTable(
   },
   (table) => ({
     emailIdx: index("users_email_idx").on(table.email),
+    disabledIdx: index("users_disabled_idx").on(table.disabledAt),
   }),
 );
 

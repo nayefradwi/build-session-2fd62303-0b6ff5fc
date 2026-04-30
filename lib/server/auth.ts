@@ -132,7 +132,9 @@ export async function createSession(
 
 /**
  * Look up a session by id, ensuring it has not expired or been revoked,
- * and return the associated user. Returns `null` for any failure case.
+ * and return the associated user. Returns `null` for any failure case
+ * (missing session, expired, revoked, or the account has been disabled
+ * by an admin).
  */
 export async function getSessionUser(
   sessionId: string,
@@ -152,6 +154,7 @@ export async function getSessionUser(
         eq(sessions.id, sessionId),
         gt(sessions.expiresAt, now),
         isNull(sessions.revokedAt),
+        isNull(users.disabledAt),
       ),
     )
     .limit(1);
