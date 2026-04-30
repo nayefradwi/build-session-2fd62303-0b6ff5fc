@@ -17,7 +17,8 @@ Copy `.env.example` to `.env.local` and fill in:
 ### Database
 
 Schema lives in `lib/db/schema.ts`. Tables: `users`, `sessions`,
-`refresh_tokens`. Generate or apply migrations with:
+`refresh_tokens`, `password_reset_tokens`, `addresses`. Generate or
+apply migrations with:
 
 ```bash
 npm run db:generate   # write SQL to ./drizzle
@@ -55,6 +56,30 @@ npm run db:migrate    # apply migrations
   policy, sets a new bcrypt hash on the user, marks the token as
   consumed, invalidates every other outstanding reset token, and revokes
   all active sessions / refresh tokens so old logins can't be reused.
+- `GET /api/users/me` — returns the authenticated user (public fields
+  only). 401 when no session.
+- `PUT /api/users/me` — `{ email?, name? | null }`. Updates the
+  authenticated user's profile. Email changes are pre-checked for
+  uniqueness and the unique index is the ultimate guard against
+  concurrent collisions. Returns 409 `email_taken` on collision.
+- `GET /api/users/me/addresses` — list every address owned by the
+  authenticated user. Default address first, then newest first.
+- `POST /api/users/me/addresses` — create an address. The first address
+  for a user is auto-promoted to default; subsequent rows respect the
+  `isDefault` flag (clearing the previous default first).
+- `GET /api/users/me/addresses/[id]` — fetch a single owned address.
+  404 when the id doesn't exist or belongs to another user.
+- `PUT /api/users/me/addresses/[id]` — partial update. Promoting via
+  `isDefault: true` demotes the prior default in the same operation.
+  Auth + ownership enforced.
+- `DELETE /api/users/me/addresses/[id]` — remove an owned address.
+  When the deleted row was the default, the most recently created
+  remaining address (if any) is promoted in its place.
+
+The `addresses` table enforces "at most one default per user" via a
+partial unique index `(user_id) WHERE is_default = true`. Application
+code clears the previous default before inserting / promoting a new one
+so the index is never violated.
 
 ### Email
 

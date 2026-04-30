@@ -5,7 +5,10 @@ import {
   text,
   timestamp,
   index,
+  boolean,
+  uniqueIndex,
 } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
 
 /**
  * Users table.
@@ -127,6 +130,56 @@ export const passwordResetTokens = pgTable(
   }),
 );
 
+/**
+ * Addresses associated with a user.
+ *
+ * A user may have many addresses (shipping, billing, etc). Exactly one
+ * address per user can be flagged as the default. The "only one default"
+ * invariant is enforced both at the application layer (the address routes
+ * clear the previous default before promoting a new row) and at the
+ * database layer via a partial unique index on `(user_id) WHERE is_default`.
+ *
+ * Fields are intentionally generic so they fit most postal systems:
+ *   - `line1` / `line2` — street address
+ *   - `city`, `state`, `postalCode`, `country`
+ *   - `recipient` — optional "ship to" name when different from the user
+ *   - `phone` — optional contact number for delivery
+ *   - `label` — optional user-facing nickname ("Home", "Work")
+ */
+export const addresses = pgTable(
+  "addresses",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    label: varchar("label", { length: 100 }),
+    recipient: varchar("recipient", { length: 200 }),
+    phone: varchar("phone", { length: 40 }),
+    line1: varchar("line1", { length: 200 }).notNull(),
+    line2: varchar("line2", { length: 200 }),
+    city: varchar("city", { length: 120 }).notNull(),
+    state: varchar("state", { length: 120 }),
+    postalCode: varchar("postal_code", { length: 32 }).notNull(),
+    country: varchar("country", { length: 2 }).notNull(),
+    isDefault: boolean("is_default").notNull().default(false),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => ({
+    userIdx: index("addresses_user_idx").on(table.userId),
+    // Partial unique index: at most one default address per user.
+    // Postgres only enforces uniqueness for rows where is_default is true.
+    userDefaultIdx: uniqueIndex("addresses_user_default_idx")
+      .on(table.userId)
+      .where(sql`${table.isDefault} = true`),
+  }),
+);
+
 export type User = typeof users.$inferSelect;
 export type NewUser = typeof users.$inferInsert;
 export type Session = typeof sessions.$inferSelect;
@@ -135,3 +188,5 @@ export type RefreshToken = typeof refreshTokens.$inferSelect;
 export type NewRefreshToken = typeof refreshTokens.$inferInsert;
 export type PasswordResetToken = typeof passwordResetTokens.$inferSelect;
 export type NewPasswordResetToken = typeof passwordResetTokens.$inferInsert;
+export type Address = typeof addresses.$inferSelect;
+export type NewAddress = typeof addresses.$inferInsert;
