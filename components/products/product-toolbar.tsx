@@ -8,32 +8,24 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 
+import { ProductSort } from "./product-sort";
+
 interface ProductToolbarProps {
   basePath: string;
   /** Total result count, displayed alongside the toolbar. */
   total: number;
 }
 
-interface SortOption {
-  value: string;
-  label: string;
-}
-
-const SORT_OPTIONS: ReadonlyArray<SortOption> = [
-  { value: "newest", label: "Newest" },
-  { value: "price_asc", label: "Price: low to high" },
-  { value: "price_desc", label: "Price: high to low" },
-  { value: "popularity", label: "Most popular" },
-  { value: "rating", label: "Highest rated" },
-  { value: "relevance", label: "Most relevant" },
-];
-
 /**
- * Toolbar atop the /products listing page.
+ * Toolbar atop the /products and /search listings.
  *
- * Hosts the search input (form GET) and the sort selector. URL query
- * parameters drive both the toolbar state and the page's data fetch,
- * so navigation history (back/forward, bookmarks, share) "just works".
+ * Hosts the search input (form GET) and the sort dropdown. URL query
+ * params drive both the toolbar state and the page's data fetch, so
+ * navigation history (back/forward, bookmarks, share) "just works".
+ *
+ * The sort control is delegated to {@link ProductSort}, which keeps
+ * every other URL param (filters, query, page) intact when the user
+ * picks a new order — sort composes with active filters by design.
  *
  * Submit re-routes to `${basePath}?...` with the new query and resets
  * `page=1` so the user lands on the first page of the new result set.
@@ -43,23 +35,15 @@ export function ProductToolbar({ basePath, total }: ProductToolbarProps) {
   const searchParams = useSearchParams();
 
   const initialQuery = searchParams.get("q") ?? "";
-  const initialSort =
-    searchParams.get("sort") ?? (initialQuery ? "relevance" : "newest");
-
   const [query, setQuery] = React.useState(initialQuery);
-  const [sort, setSort] = React.useState(initialSort);
 
   // Keep local form state in sync if the URL changes via Back/Forward
   // navigation or programmatic pushes from elsewhere on the page.
   React.useEffect(() => {
     setQuery(searchParams.get("q") ?? "");
-    setSort(
-      searchParams.get("sort") ??
-        (searchParams.get("q") ? "relevance" : "newest"),
-    );
   }, [searchParams]);
 
-  function buildHref(nextQuery: string, nextSort: string): string {
+  function buildHref(nextQuery: string): string {
     const params = new URLSearchParams(searchParams.toString());
     params.delete("page");
     if (nextQuery.trim().length > 0) {
@@ -67,20 +51,13 @@ export function ProductToolbar({ basePath, total }: ProductToolbarProps) {
     } else {
       params.delete("q");
     }
-    params.set("sort", nextSort);
     const qs = params.toString();
     return qs.length > 0 ? `${basePath}?${qs}` : basePath;
   }
 
   function onSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
-    router.push(buildHref(query, sort));
-  }
-
-  function onSortChange(e: React.ChangeEvent<HTMLSelectElement>) {
-    const next = e.target.value;
-    setSort(next);
-    router.push(buildHref(query, next));
+    router.push(buildHref(query));
   }
 
   return (
@@ -116,22 +93,14 @@ export function ProductToolbar({ basePath, total }: ProductToolbarProps) {
       </form>
 
       <div className="flex flex-col gap-1.5 md:items-end">
-        <Label htmlFor="product-sort" className="text-xs">
+        <Label htmlFor="product-sort-button" className="text-xs">
           Sort by
         </Label>
         <div className="flex items-center gap-3">
-          <select
-            id="product-sort"
-            value={sort}
-            onChange={onSortChange}
-            className="flex h-10 rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
-          >
-            {SORT_OPTIONS.map((option) => (
-              <option key={option.value} value={option.value}>
-                {option.label}
-              </option>
-            ))}
-          </select>
+          <ProductSort
+            basePath={basePath}
+            buttonId="product-sort-button"
+          />
           <span className="hidden whitespace-nowrap text-xs text-muted-foreground sm:inline">
             {total.toLocaleString()} {total === 1 ? "result" : "results"}
           </span>
