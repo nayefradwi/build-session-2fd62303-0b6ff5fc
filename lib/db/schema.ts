@@ -641,3 +641,74 @@ export const ORDER_STATUSES = [
   "cancelled",
 ] as const;
 export type OrderStatus = (typeof ORDER_STATUSES)[number];
+
+/**
+ * Product reviews.
+ *
+ * One row per (user, product) pair — a shopper can post at most one
+ * review per product. The natural-key uniqueness is enforced both with
+ * a unique index AND a pre-check in the route layer so callers receive
+ * a clean 409 instead of a generic constraint-violation error.
+ *
+ * Fields:
+ *   - `rating`     integer 1-5. A CHECK constraint in the migration
+ *                  enforces the range at the database layer; the route
+ *                  layer also rejects out-of-range values up front so
+ *                  the response error is descriptive.
+ *   - `comment`    optional free-form text. Trimmed at the route layer;
+ *                  reviews with no comment are perfectly valid.
+ *   - `verifiedPurchase` snapshot of the gating rule at write time —
+ *                  the POST route requires the reviewer have actually
+ *                  bought the product (an `order_items` row referencing
+ *                  this product on an order owned by the user). The
+ *                  flag persists alongside the review so a moderation
+ *                  UI never has to recompute it.
+ *
+ * Both foreign keys cascade on delete so removing a user (or product)
+ * tears down their reviews; subsequent reads of the parent product's
+ * rating aggregate stay consistent because the route-layer recompute
+ * (or, in this iteration, the on-write recompute below) re-derives
+ * `rating_average` / `rating_count` from the live `reviews` rows.
+ */
+export const reviews = pgTable(
+  "reviews",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    productId: uuid("product_id")
+      .notNull()
+      .references(() => products.id, { onDelete: "cascade" }),
+    rating: integer("rating").notNull(),
+    comment: text("comment"),
+    /**
+     * Snapshot — true when the reviewer had at least one delivered/paid/
+     * shipped/etc. order containing this product at write time. The route
+     * layer requires this to be true to accept the review.
+     */
+    verifiedPurchase: boolean("verified_purchase").notNull().default(false),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => ({
+    userIdx: index("reviews_user_idx").on(table.userId),
+    productIdx: index("reviews_product_idx").on(table.productId),
+    productCreatedAtIdx: index("reviews_product_created_at_idx").on(
+      table.productId,
+      table.createdAt,
+    ),
+    // Prevent duplicates: a user can review a given product at most once.
+    userProductIdx: uniqueIndex("reviews_user_product_idx").on(
+      table.userId,
+      table.productId,
+    ),
+  }),
+);
+
+export type Review = typeof reviews.$inferSelect;
+export type NewReview = typeof reviews.$inferInsert;

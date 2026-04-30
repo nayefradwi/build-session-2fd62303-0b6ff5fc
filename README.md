@@ -98,6 +98,23 @@ so the index is never violated.
   product, ordered by popularity with material/color affinity as a
   tie-breaker. The `related` query parameter overrides the default
   count (8, capped at 24).
+- `GET /api/products/{id}/reviews` — paginated, newest-first review
+  list for the given product (id or slug). Page metadata mirrors the
+  rest of the catalog (`page`, `pageSize`, `total`, `totalPages`,
+  `hasMore`). The response also carries a `summary: { average, count }`
+  snapshot of the parent product's denormalised rating aggregates.
+  Default page size is 10 (max 50).
+- `POST /api/products/{id}/reviews` — `{ rating, comment? }`. Creates a
+  review by the authenticated user against the given product. The
+  endpoint enforces the verified-purchaser rule (the user must have an
+  `order_items` row referencing this product on an order they own),
+  rating in `[1, 5]`, an optional comment, and one review per user per
+  product. On success the parent product's `rating_average` /
+  `rating_count` aggregates are recomputed from the live `reviews`
+  rows. Responses: 201 with `{ review, summary }`, 401 if
+  unauthenticated, 403 `not_verified_purchaser`, 404 if the product is
+  unknown, 409 `already_reviewed` if the user already reviewed this
+  product.
 
 #### Wishlist
 
