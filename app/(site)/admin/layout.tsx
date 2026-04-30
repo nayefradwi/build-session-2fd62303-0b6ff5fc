@@ -25,7 +25,7 @@ export default async function AdminLayout({
 }) {
   const user = await getCurrentUser();
   if (!user) {
-    redirect("/login?next=/admin/discounts");
+    redirect("/login?next=/admin/products");
   }
   if (!isAdmin(user)) {
     // Authenticated but not an admin — send them home rather than
