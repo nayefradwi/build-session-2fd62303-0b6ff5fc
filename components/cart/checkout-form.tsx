@@ -195,7 +195,7 @@ function formatAddressLines(a: Address): string[] {
  *      payload) and the active discount code (when present) to
  *      POST /api/orders. The route transactionally commits the order
  *      and clears the cart. We refresh the cart store and route to
- *      /checkout/confirmation/{orderId} on success so the user lands
+ *      /orders/{orderId}/confirmation on success so the user lands
  *      on a dedicated thank-you screen.
  */
 export function CheckoutForm({
@@ -527,7 +527,9 @@ export function CheckoutForm({
       });
       // Drop the user on the dedicated confirmation page so they get a
       // proper "thank you" view of the order they just committed.
-      router.push(`/checkout/confirmation/${encodeURIComponent(body.order.id)}`);
+      router.push(
+        `/orders/${encodeURIComponent(body.order.id)}/confirmation`,
+      );
       router.refresh();
     } catch (err) {
       const message =
