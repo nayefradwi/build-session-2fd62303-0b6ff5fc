@@ -467,6 +467,34 @@ zod, sonner toasts.
 - `components/ui/dialog.tsx` — shadcn-style dialog primitive backed by
   `@radix-ui/react-dialog`.
 
+#### Admin
+
+- `app/(site)/admin/layout.tsx` — `/admin/*` shell. Server component
+  that calls `getCurrentUser()` + `isAdmin()` and bounces non-admins
+  (signed-out → `/login?next=…`, signed-in non-admin → `/`). Renders a
+  sidebar nav and the admin section content.
+- `app/(site)/admin/page.tsx` — `/admin` index, redirects to
+  `/admin/discounts` (the only admin section today).
+- `app/(site)/admin/discounts/page.tsx` — list page seeded server-side
+  via `listDiscountCodes()`. Reads `?q`, `?status`, `?page` from the
+  URL so the view is bookmarkable.
+- `app/(site)/admin/discounts/new/page.tsx` — create form shell.
+- `app/(site)/admin/discounts/[id]/page.tsx` — edit form shell, loads
+  the row by id via `getDiscountCodeById()` and 404s on unknown ids.
+- `components/admin/discount-codes-list.tsx` — client list with debounced
+  search (matches code or description), status filter, paginated table
+  showing code/discount/min order/expiry/usage count/status, and a
+  delete-with-confirmation dialog wired to
+  `DELETE /api/admin/discount-codes/{id}`.
+- `components/admin/discount-code-form.tsx` — client create/edit form
+  for a single code. Submits to `POST` / `PUT /api/admin/discount-codes`,
+  surfaces 409 `code_taken` as an inline error on the code field, and
+  shows the live usage count when editing.
+- `components/admin/admin-nav.tsx` — sidebar nav with active-link
+  highlighting; mirrors the `/account` nav pattern.
+- `lib/client/discount-code-schema.ts` — zod schema + payload adapters
+  (cents ↔ dollars, ISO ↔ datetime-local) for the discount-code form.
+
 ### Cross-tab session state
 
 The auth header relies on the same httpOnly + `SameSite=Lax` + `path=/`
