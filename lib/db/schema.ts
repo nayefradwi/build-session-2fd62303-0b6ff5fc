@@ -500,3 +500,144 @@ export const discountCodes = pgTable(
 
 export type DiscountCode = typeof discountCodes.$inferSelect;
 export type NewDiscountCode = typeof discountCodes.$inferInsert;
+
+/**
+ * Orders.
+ *
+ * One row per checkout commit. Created by `POST /api/orders` from a
+ * user's cart inside a serializable transaction that also decrements the
+ * relevant `products.stock`, bumps `discount_codes.usage_count` (when a
+ * promo applied), and clears the cart.
+ *
+ * Pricing fields are integer cents to match the rest of the catalog. The
+ * shipping address is BOTH referenced by id (so admin/listing UIs can
+ * follow a `JOIN` cleanly) AND snapshotted into denormalised columns so
+ * the order-history view stays correct after a user edits or deletes the
+ * underlying address row.
+ *
+ * Status vocabulary (intentionally informal — formal state machine lives
+ * in a follow-up admin task):
+ *
+ *   - "pending"   → freshly created, awaiting payment / fulfilment
+ *   - "paid"      → payment captured (future)
+ *   - "shipped"   → in transit (future)
+ *   - "delivered" → completed (future)
+ *   - "cancelled" → reversed (future)
+ *
+ * `discount_code_id` references the discount row that was applied (or
+ * NULL for no-promo orders); `discount_code` holds the literal code text
+ * for display so an admin renaming/deleting a code does not break the
+ * receipt UI.
+ */
+export const orders = pgTable(
+  "orders",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "restrict" }),
+    status: varchar("status", { length: 32 }).notNull().default("pending"),
+
+    // Shipping address — referenced (when known) and snapshotted.
+    shippingAddressId: uuid("shipping_address_id").references(
+      () => addresses.id,
+      { onDelete: "set null" },
+    ),
+    shippingRecipient: varchar("shipping_recipient", { length: 200 }),
+    shippingPhone: varchar("shipping_phone", { length: 40 }),
+    shippingLine1: varchar("shipping_line1", { length: 200 }).notNull(),
+    shippingLine2: varchar("shipping_line2", { length: 200 }),
+    shippingCity: varchar("shipping_city", { length: 120 }).notNull(),
+    shippingState: varchar("shipping_state", { length: 120 }),
+    shippingPostalCode: varchar("shipping_postal_code", { length: 32 }).notNull(),
+    shippingCountry: varchar("shipping_country", { length: 2 }).notNull(),
+
+    // Pricing snapshot.
+    subtotalCents: integer("subtotal_cents").notNull(),
+    shippingCents: integer("shipping_cents").notNull().default(0),
+    discountCents: integer("discount_cents").notNull().default(0),
+    totalCents: integer("total_cents").notNull(),
+    currency: varchar("currency", { length: 3 }).notNull().default("USD"),
+
+    // Discount snapshot. The id may go null if the code is later deleted;
+    // the literal `discount_code` string is preserved for display.
+    discountCodeId: uuid("discount_code_id").references(
+      () => discountCodes.id,
+      { onDelete: "set null" },
+    ),
+    discountCode: varchar("discount_code", { length: 64 }),
+
+    /** Sum of `quantity` across every line — denormalised for fast reads. */
+    itemCount: integer("item_count").notNull(),
+    notes: text("notes"),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => ({
+    userIdx: index("orders_user_idx").on(table.userId),
+    statusIdx: index("orders_status_idx").on(table.status),
+    createdAtIdx: index("orders_created_at_idx").on(table.createdAt),
+    addressIdx: index("orders_shipping_address_idx").on(table.shippingAddressId),
+  }),
+);
+
+/**
+ * Line items belonging to an order.
+ *
+ * Every product attribute the order surface needs is snapshotted at
+ * write time so subsequent product edits or deletions cannot rewrite
+ * order history. `product_id` is kept as a soft reference (set-null on
+ * delete) for analytics and re-order flows that want to link back to the
+ * live SKU when it still exists.
+ */
+export const orderItems = pgTable(
+  "order_items",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orderId: uuid("order_id")
+      .notNull()
+      .references(() => orders.id, { onDelete: "cascade" }),
+    productId: uuid("product_id").references(() => products.id, {
+      onDelete: "set null",
+    }),
+
+    // Product snapshot (preserved if the product row is later deleted).
+    sku: varchar("sku", { length: 64 }).notNull(),
+    name: varchar("name", { length: 300 }).notNull(),
+    size: varchar("size", { length: 32 }),
+    material: varchar("material", { length: 64 }),
+    color: varchar("color", { length: 32 }),
+    imageUrl: text("image_url"),
+
+    quantity: integer("quantity").notNull(),
+    unitPriceCents: integer("unit_price_cents").notNull(),
+    lineTotalCents: integer("line_total_cents").notNull(),
+    currency: varchar("currency", { length: 3 }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => ({
+    orderIdx: index("order_items_order_idx").on(table.orderId),
+    productIdx: index("order_items_product_idx").on(table.productId),
+  }),
+);
+
+export type Order = typeof orders.$inferSelect;
+export type NewOrder = typeof orders.$inferInsert;
+export type OrderItem = typeof orderItems.$inferSelect;
+export type NewOrderItem = typeof orderItems.$inferInsert;
+
+/** Order-status vocabulary surfaced to API consumers. */
+export const ORDER_STATUSES = [
+  "pending",
+  "paid",
+  "shipped",
+  "delivered",
+  "cancelled",
+] as const;
+export type OrderStatus = (typeof ORDER_STATUSES)[number];

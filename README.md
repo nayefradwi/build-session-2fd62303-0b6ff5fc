@@ -150,6 +150,51 @@ partial-unique-index pattern as the wishlist. If a concurrent insert
 would otherwise collide, the helper falls back to updating the row that
 won the race using the original mode (increment vs set).
 
+#### Orders (checkout commit)
+
+- `POST /api/orders` — turns the authenticated user's cart into an
+  order. Body:
+  ```jsonc
+  {
+    "addressId": "<existing addresses.id>",   // OR…
+    "address":   { "line1": "...", "city": "...", "postalCode": "...", "country": "US", ... },
+    "discountCode": "SUMMER10",                // optional
+    "notes": "leave at door"                    // optional
+  }
+  ```
+  The address can be either an existing id (validated to belong to the
+  user) OR an inline new-address payload (persisted before the order
+  runs; honours `isDefault`). The handler:
+  1. Loads the cart, recomputes prices from live `products.priceCents`,
+     re-validates the discount, and adds a flat-rate $5.99 shipping fee
+     (waived above $100 after discount).
+  2. Issues a single SERIALIZABLE Postgres transaction (via
+     `neonSql.transaction([...], { isolationLevel: "Serializable" })`)
+     that inserts `orders` + `order_items`, decrements
+     `products.stock`, increments `salesCount`, bumps the redeemed
+     code's `discount_codes.usage_count`, and clears the cart.
+  3. Race-free inventory enforcement comes from a
+     `CHECK (stock >= 0)` constraint on `products` (added in migration
+     `0007_orders.sql`) — a concurrent decrement that drives any line
+     below zero aborts the entire transaction. Discount over-redemption
+     is caught the same way via
+     `CHECK (usage_limit IS NULL OR usage_count <= usage_limit)`.
+  4. Returns 201 `{ order }` on success with `{ id, status: "pending",
+     items, subtotalCents, shippingCents, discountCents, totalCents,
+     currency, shippingAddress, ... }`. Errors:
+     - 400 `validation_failed` / `address_required` / `address_conflict`
+     - 401 `unauthenticated`
+     - 404 `address_not_found`
+     - 409 `cart_empty` / `stock_conflict` / `product_unavailable` /
+       `discount_invalid`
+     - 500 `internal_error` (transient SSI serialization failure;
+       client should retry)
+
+The order keeps a denormalised snapshot of the shipping address, the
+applied discount, and every line item so subsequent edits/deletes to
+the underlying address / discount / product rows do not rewrite order
+history.
+
 ### Discount codes (admin)
 
 Admin-managed promo codes live in the `discount_codes` table. Each row

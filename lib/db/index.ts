@@ -15,5 +15,14 @@ const sql = neon(env.DATABASE_URL);
 
 export const db = drizzle(sql, { schema });
 
+/**
+ * Raw Neon HTTP SQL tag. The drizzle wrapper does NOT expose a working
+ * `db.transaction()` for the HTTP driver (it throws); for code paths that
+ * genuinely need a batched/atomic transaction with a custom isolation
+ * level, use `neonSql.transaction([...queries], { isolationLevel: ... })`
+ * directly. Order creation (POST /api/orders) is the canonical example.
+ */
+export const neonSql = sql;
+
 export { schema };
 export * from "./schema";
