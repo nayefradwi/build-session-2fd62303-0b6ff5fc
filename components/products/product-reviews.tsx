@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import Link from "next/link";
-import { Loader2, MessageSquare, ShieldCheck } from "lucide-react";
+import { Loader2, MessageSquare, ShieldCheck, Star } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { ReviewForm } from "@/components/products/review-form";
@@ -73,6 +73,98 @@ function formatDate(iso: string): string {
   } catch {
     return "";
   }
+}
+
+/**
+ * Compute a 5-bucket rating distribution from a set of review items.
+ *
+ * The API does not currently return a server-side histogram, so we
+ * derive one from whatever the client has already loaded. The caller
+ * decides whether the result represents the *full* review set (all
+ * reviews fit in `items`) or just a *sample* (more pages remain to be
+ * loaded), and labels the chart accordingly.
+ *
+ * Returns counts indexed by [5, 4, 3, 2, 1] — i.e. distribution[0] is
+ * the count of 5-star reviews, distribution[4] is the count of 1-star
+ * reviews — matching the typical top-down chart order.
+ */
+function computeRatingDistribution(
+  items: Array<{ rating: number }>,
+): Record<1 | 2 | 3 | 4 | 5, number> {
+  const dist: Record<1 | 2 | 3 | 4 | 5, number> = { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 };
+  for (const r of items) {
+    const k = Math.max(1, Math.min(5, Math.round(r.rating))) as 1 | 2 | 3 | 4 | 5;
+    dist[k] += 1;
+  }
+  return dist;
+}
+
+/**
+ * Five horizontal progress bars (5★ → 1★) showing the share of reviews
+ * that landed at each rating. When `complete` is false (we have only a
+ * partial sample), the chart is annotated so users don't mistake the
+ * sample share for the full population's distribution.
+ */
+function RatingDistribution({
+  distribution,
+  total,
+  complete,
+}: {
+  distribution: Record<1 | 2 | 3 | 4 | 5, number>;
+  total: number;
+  complete: boolean;
+}) {
+  if (total <= 0) return null;
+  const order: Array<1 | 2 | 3 | 4 | 5> = [5, 4, 3, 2, 1];
+  return (
+    <div
+      className="space-y-1.5"
+      data-testid="reviews-distribution"
+      aria-label={
+        complete
+          ? "Rating distribution"
+          : "Rating distribution (based on reviews loaded so far)"
+      }
+    >
+      {order.map((star) => {
+        const cnt = distribution[star];
+        const pct = total > 0 ? Math.round((cnt / total) * 100) : 0;
+        return (
+          <div
+            key={star}
+            className="flex items-center gap-2 text-xs text-muted-foreground"
+          >
+            <span className="inline-flex w-12 items-center gap-1 tabular-nums text-foreground">
+              {star}
+              <Star
+                className="h-3 w-3 fill-amber-400 text-amber-400"
+                aria-hidden="true"
+              />
+            </span>
+            <span
+              className="relative h-2 flex-1 overflow-hidden rounded-full bg-muted"
+              role="progressbar"
+              aria-valuemin={0}
+              aria-valuemax={100}
+              aria-valuenow={pct}
+              aria-label={`${star} stars: ${cnt} of ${total} reviews (${pct}%)`}
+            >
+              <span
+                className="absolute inset-y-0 left-0 bg-amber-400"
+                style={{ width: `${pct}%` }}
+              />
+            </span>
+            <span className="w-10 text-right tabular-nums">{cnt}</span>
+          </div>
+        );
+      })}
+      {!complete && (
+        <p className="pt-0.5 text-[11px] italic text-muted-foreground">
+          Distribution reflects reviews loaded so far. Load more to refine it.
+        </p>
+      )}
+    </div>
+  );
 }
 
 /**
@@ -165,6 +257,17 @@ export function ProductReviews({
   const nextPath = `/products/${productSlug}`;
   const encoded = encodeURIComponent(nextPath);
 
+  // Derive a rating histogram from the reviews currently in the
+  // client. When `data.total` matches the loaded item count we know
+  // the sample is complete — otherwise we annotate the chart so the
+  // share isn't mistaken for the full distribution.
+  const distribution = React.useMemo(
+    () => computeRatingDistribution(data.items),
+    [data.items],
+  );
+  const distributionComplete =
+    data.items.length >= data.total && data.total > 0;
+
   return (
     <section
       id="reviews"
@@ -196,6 +299,33 @@ export function ProductReviews({
           </span>
         )}
       </div>
+
+      {/* Headline aggregate + per-star distribution. */}
+      {summary.count > 0 && (
+        <div
+          className="grid gap-6 rounded-lg border bg-muted/30 p-4 sm:grid-cols-[auto_1fr] sm:gap-8 sm:p-5"
+          data-testid="reviews-summary"
+        >
+          <div className="flex flex-col items-start justify-center gap-1">
+            <div className="flex items-baseline gap-1.5">
+              <span className="text-4xl font-bold tracking-tight tabular-nums">
+                {formatRating(summary.average)}
+              </span>
+              <span className="text-sm text-muted-foreground">/ 5</span>
+            </div>
+            <ReviewStars value={summary.average} size={18} />
+            <span className="text-xs text-muted-foreground">
+              Based on {summary.count.toLocaleString()}{" "}
+              {summary.count === 1 ? "review" : "reviews"}
+            </span>
+          </div>
+          <RatingDistribution
+            distribution={distribution}
+            total={data.items.length}
+            complete={distributionComplete}
+          />
+        </div>
+      )}
 
       {/* Eligibility-aware action area. */}
       {eligibility === "eligible" && (
@@ -273,6 +403,27 @@ export function ProductReviews({
 
       {/* Reviews list. */}
       <div className="space-y-4" data-testid="reviews-list">
+        {data.items.length > 0 && (
+          <div
+            className="flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground"
+            data-testid="reviews-list-meta"
+          >
+            <span>
+              Showing{" "}
+              <span className="font-medium text-foreground tabular-nums">
+                {data.items.length.toLocaleString()}
+              </span>{" "}
+              of{" "}
+              <span className="font-medium text-foreground tabular-nums">
+                {data.total.toLocaleString()}
+              </span>{" "}
+              {data.total === 1 ? "review" : "reviews"}
+            </span>
+            <span className="inline-flex items-center gap-1">
+              Sorted by <span className="font-medium text-foreground">most recent</span>
+            </span>
+          </div>
+        )}
         {data.items.length === 0 ? (
           <div className="rounded-md border border-dashed p-6 text-center text-sm text-muted-foreground">
             No reviews yet. Be the first to share your thoughts.
