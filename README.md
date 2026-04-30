@@ -81,6 +81,24 @@ partial unique index `(user_id) WHERE is_default = true`. Application
 code clears the previous default before inserting / promoting a new one
 so the index is never violated.
 
+#### Catalog
+
+- `GET /api/products` — public browse. Supports full-text search via
+  `q`, multi-value `category` / `size` / `material` / `color` filters,
+  `priceMin`/`priceMax` range, `availability=in_stock|out_of_stock|all`,
+  `featured`/`new` flags, and `sort=price_asc|price_desc|newest|popularity|rating|relevance`
+  (default `relevance` if `q`, otherwise `newest`). Paginated via `page`
+  and `pageSize` (default 24, max 100).
+- `GET /api/products/{id}` — PDP payload. Accepts either UUID or slug
+  and returns `{ product }` with full attributes, the complete image
+  gallery, stock availability (`stock`, `inStock`), aggregated
+  `rating: { average, count }`, and `related` — recommended products in
+  the same category (the schema has no separate brand column, so the
+  category is the canonical "brand bucket"), excluding the current
+  product, ordered by popularity with material/color affinity as a
+  tie-breaker. The `related` query parameter overrides the default
+  count (8, capped at 24).
+
 ### Email
 
 `lib/server/email.ts` wraps Resend's REST API via `fetch`. When

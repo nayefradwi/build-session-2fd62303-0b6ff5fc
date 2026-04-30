@@ -21,6 +21,7 @@ import {
   gte,
   inArray,
   lte,
+  ne,
   or,
   sql,
   type SQL,
@@ -104,8 +105,25 @@ export interface PublicProduct {
   updatedAt: string;
 }
 
+export interface PublicProductImage {
+  id: string;
+  url: string;
+  alt: string | null;
+  position: number;
+}
+
 export interface PublicProductDetail extends PublicProduct {
-  images: Array<{ id: string; url: string; alt: string | null; position: number }>;
+  /**
+   * Full PDP image gallery, ordered by position ascending. The first
+   * entry mirrors `primaryImageUrl` on the base product shape.
+   */
+  images: PublicProductImage[];
+  /**
+   * Recommendations shown on the PDP. Populated from products in the
+   * same category, excluding this product, ordered by popularity. Empty
+   * array if the product has no category or no peers.
+   */
+  related: PublicProduct[];
 }
 
 export interface ProductListResult {
@@ -387,12 +405,88 @@ export async function listProducts(
   };
 }
 
+/** Default number of related products to surface on the PDP. */
+export const RELATED_PRODUCTS_DEFAULT_LIMIT = 8;
+/** Hard cap so an unbounded `limit` query param can't exhaust the DB. */
+export const RELATED_PRODUCTS_MAX_LIMIT = 24;
+
+export function clampRelatedLimit(input: number | undefined): number {
+  if (!input || !Number.isFinite(input) || input <= 0) {
+    return RELATED_PRODUCTS_DEFAULT_LIMIT;
+  }
+  return Math.min(Math.floor(input), RELATED_PRODUCTS_MAX_LIMIT);
+}
+
+/**
+ * Find products related to the given product. The catalog has no first-
+ * class brand column, so "same brand" is approximated by matching on the
+ * shared category (the canonical merchandising bucket). Tie-breakers
+ * prefer SKUs with the same material or color so the recommendations
+ * are visually/categorically cohesive without requiring an exact match.
+ *
+ * Always excludes the source product itself. If the source has no
+ * category, returns an empty array — there is no useful signal to fall
+ * back on with the current schema.
+ */
+export async function getRelatedProducts(
+  source: Product,
+  limit: number = RELATED_PRODUCTS_DEFAULT_LIMIT,
+): Promise<PublicProduct[]> {
+  if (!source.categoryId) return [];
+  const cap = clampRelatedLimit(limit);
+
+  // Score: +2 for same material, +2 for same color. Ties broken by
+  // popularity (sales) and rating, then recency for stability.
+  const sameMaterial = source.material
+    ? sql<number>`CASE WHEN ${products.material} = ${source.material} THEN 2 ELSE 0 END`
+    : sql<number>`0`;
+  const sameColor = source.color
+    ? sql<number>`CASE WHEN ${products.color} = ${source.color} THEN 2 ELSE 0 END`
+    : sql<number>`0`;
+
+  const rows = await db
+    .select({
+      product: products,
+      category: categories,
+      affinity: sql<number>`(${sameMaterial} + ${sameColor})`,
+    })
+    .from(products)
+    .leftJoin(categories, eq(categories.id, products.categoryId))
+    .where(
+      and(
+        eq(products.categoryId, source.categoryId),
+        ne(products.id, source.id),
+      ),
+    )
+    .orderBy(
+      sql`(${sameMaterial} + ${sameColor}) DESC`,
+      desc(products.salesCount),
+      desc(products.ratingAverage),
+      desc(products.createdAt),
+    )
+    .limit(cap);
+
+  if (rows.length === 0) return [];
+
+  const productIds = rows.map((r) => r.product.id);
+  const primaryImages = await fetchPrimaryImages(productIds);
+
+  return rows.map((r) =>
+    toPublicProduct(
+      { product: r.product, category: r.category },
+      primaryImages.get(r.product.id) ?? null,
+    ),
+  );
+}
+
 /**
  * Fetch a single product by either UUID or slug. Returns null if it
- * doesn't exist. Includes the full image gallery.
+ * doesn't exist. Includes the full image gallery and a related-products
+ * roster (same category, popularity-ordered) for the PDP.
  */
 export async function getProductByIdOrSlug(
   idOrSlug: string,
+  options: { relatedLimit?: number } = {},
 ): Promise<PublicProductDetail | null> {
   const predicate = isUuid(idOrSlug)
     ? eq(products.id, idOrSlug)
@@ -411,23 +505,31 @@ export async function getProductByIdOrSlug(
   const row = rows[0];
   if (!row) return null;
 
-  const imageRows: ProductImage[] = await db
-    .select()
-    .from(productImages)
-    .where(eq(productImages.productId, row.product.id))
-    .orderBy(asc(productImages.position), asc(productImages.createdAt));
+  const [imageRows, related] = await Promise.all([
+    db
+      .select()
+      .from(productImages)
+      .where(eq(productImages.productId, row.product.id))
+      .orderBy(asc(productImages.position), asc(productImages.createdAt)),
+    getRelatedProducts(
+      row.product,
+      clampRelatedLimit(options.relatedLimit),
+    ),
+  ]);
 
-  const primary = imageRows[0]?.url ?? null;
+  const typedImages: ProductImage[] = imageRows;
+  const primary = typedImages[0]?.url ?? null;
   const base = toPublicProduct(row, primary);
 
   return {
     ...base,
-    images: imageRows.map((img) => ({
+    images: typedImages.map((img) => ({
       id: img.id,
       url: img.url,
       alt: img.alt ?? null,
       position: img.position,
     })),
+    related,
   };
 }
 
