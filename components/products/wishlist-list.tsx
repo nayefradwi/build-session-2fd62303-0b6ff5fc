@@ -10,6 +10,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { cn } from "@/lib/client/utils";
+import { useCart } from "@/lib/client/cart-store";
 import { formatPrice } from "@/lib/client/format";
 import type { WishlistEntryView } from "@/lib/client/wishlist-types";
 import { useWishlist } from "@/lib/client/wishlist-store";
@@ -58,6 +59,7 @@ interface CartErrorBody {
 export function WishlistList({ items }: WishlistListProps) {
   const router = useRouter();
   const wishlist = useWishlist();
+  const cart = useCart();
   const [busyId, setBusyId] = React.useState<string | null>(null);
   const [busyAction, setBusyAction] = React.useState<
     "remove" | "cart" | null
@@ -182,11 +184,13 @@ export function WishlistList({ items }: WishlistListProps) {
         return;
       }
 
-      // Cart add succeeded — optimistically hide the row, then quietly
-      // remove it from the wishlist on the server. We surface a single
-      // success toast that reflects the move so the user isn't double-
-      // notified by the wishlist provider (`silent: true` suppresses the
-      // provider's own "Removed from wishlist" toast).
+      // Cart add succeeded — bump the header badge optimistically, then
+      // optimistically hide the row and quietly remove it from the
+      // wishlist on the server. We surface a single success toast that
+      // reflects the move so the user isn't double-notified by the
+      // wishlist provider (`silent: true` suppresses the provider's own
+      // "Removed from wishlist" toast).
+      cart.incrementCount(1);
       markRemoved(entry.productId);
       const removeResult = await wishlist.remove(
         entry.productId,
@@ -207,6 +211,9 @@ export function WishlistList({ items }: WishlistListProps) {
           description: `${product.name} is in your cart and removed from your wishlist.`,
         });
       }
+      // Reconcile the badge against the server's authoritative count
+      // (in case the increment over-counted relative to a stock cap).
+      void cart.refresh();
       router.refresh();
     } catch (err) {
       toast.error("Network error", {

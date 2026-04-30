@@ -2,6 +2,7 @@ import Link from "next/link";
 import { Heart } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
+import { CartLink } from "@/components/site/cart-link";
 import { HeaderSearch } from "@/components/site/header-search";
 import { LogoutButton } from "@/components/site/logout-button";
 import { getCurrentUser } from "@/lib/server/auth";
@@ -66,6 +67,9 @@ export async function SiteHeader() {
                   <span className="sr-only sm:not-sr-only">Wishlist</span>
                 </Link>
               </Button>
+              {/* Client subscriber to the cart store — shows a small
+                  badge with the live item count once /api/cart resolves. */}
+              <CartLink />
               <LogoutButton />
             </>
           ) : (
