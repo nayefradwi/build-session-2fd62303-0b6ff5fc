@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
   ArrowLeft,
+  Banknote,
   CheckCircle2,
   Loader2,
   Lock,
@@ -27,8 +28,21 @@ import type {
   NormalizedDiscountView,
 } from "@/lib/client/cart-types";
 import type { Address } from "@/components/account/types";
+import {
+  addressFormSchema,
+  emptyAddressFormValues,
+  toAddressApiPayload,
+  type AddressFormValues,
+} from "@/lib/client/address-schema";
 import { formatPrice } from "@/lib/client/format";
 import { cn } from "@/lib/client/utils";
+
+/**
+ * Sentinel value used in `selectedAddressId` to signal "the shopper is
+ * filling in a brand-new address inline" rather than picking a saved
+ * row. The `__` prefix guarantees no collision with a real UUID.
+ */
+const NEW_ADDRESS_SENTINEL = "__new__";
 
 /**
  * Mirror of `FLAT_SHIPPING_CENTS` and `FREE_SHIPPING_THRESHOLD_CENTS`
@@ -121,12 +135,13 @@ function computeTotals(
 /**
  * Pick the address that should be selected on first paint. Defaults to
  * the user's `isDefault` address; falls back to the first row in the
- * list. Returns null when the user has no saved addresses.
+ * list. Returns the `NEW_ADDRESS_SENTINEL` when the user has no saved
+ * addresses so the inline new-address form is shown immediately.
  */
 function pickInitialAddressId(
   addresses: ReadonlyArray<Address>,
-): string | null {
-  if (addresses.length === 0) return null;
+): string {
+  if (addresses.length === 0) return NEW_ADDRESS_SENTINEL;
   const defaultRow = addresses.find((a) => a.isDefault);
   return (defaultRow ?? addresses[0]).id;
 }
@@ -152,9 +167,14 @@ function formatAddressLines(a: Address): string[] {
  *      whenever a promo is applied or removed.
  *
  *   2. Shipping address picker. The default-flagged saved address is
- *      pre-selected; users with no saved addresses see a CTA pointing
- *      to /account/addresses (Place Order is disabled until they have
- *      at least one).
+ *      pre-selected. Users without any saved addresses (or who pick the
+ *      "Use a new address" radio) get an inline address form they can
+ *      fill in without leaving checkout, plus a "Save this address to
+ *      my account" toggle that promotes the new address to the user's
+ *      default. The order API persists every inline address regardless
+ *      so a one-off ship-to is still recorded against the order, but
+ *      the toggle controls whether it becomes the auto-selected default
+ *      next time.
  *
  *   3. Promo code input + Apply button. Calls
  *      POST /api/discount-codes/validate. Inline error states cover the
@@ -166,11 +186,17 @@ function formatAddressLines(a: Address): string[] {
  *      before applying a different one) and on the server (one
  *      `discountCode` field on POST /api/orders).
  *
- *   4. Place Order CTA. Submits the chosen address (id) and the active
- *      discount code (when present) to POST /api/orders. The route
- *      transactionally commits the order and clears the cart. We refresh
- *      the cart store and route to /account/orders on success so the
- *      user lands on their newly-created order.
+ *   4. Cash on Delivery payment method. The only payment rail this
+ *      storefront supports is COD; the shopper must explicitly tick a
+ *      confirmation checkbox acknowledging they will pay cash on
+ *      delivery before the Place Order CTA enables.
+ *
+ *   5. Place Order CTA. Submits the chosen address (id OR inline
+ *      payload) and the active discount code (when present) to
+ *      POST /api/orders. The route transactionally commits the order
+ *      and clears the cart. We refresh the cart store and route to
+ *      /checkout/confirmation/{orderId} on success so the user lands
+ *      on a dedicated thank-you screen.
  */
 export function CheckoutForm({
   initialItems,
@@ -317,9 +343,49 @@ export function CheckoutForm({
   }, []);
 
   // ─── Address selection ─────────────────────────────────────────────
-  const [selectedAddressId, setSelectedAddressId] = React.useState<
-    string | null
-  >(() => pickInitialAddressId(addresses));
+  // `selectedAddressId` is either an `addresses[i].id`, or the
+  // `NEW_ADDRESS_SENTINEL` string meaning "use the inline new-address
+  // form below". We never carry `null` — when the user has no saved
+  // addresses we default straight into new-address mode so they see the
+  // form right away.
+  const [selectedAddressId, setSelectedAddressId] = React.useState<string>(
+    () => pickInitialAddressId(addresses),
+  );
+
+  const [newAddress, setNewAddress] = React.useState<AddressFormValues>(
+    emptyAddressFormValues,
+  );
+  // When ON we pass `isDefault: true` to the order API so the address
+  // becomes the auto-selected option for next checkout. The order
+  // endpoint always persists the inline row in `addresses`; this toggle
+  // is purely about whether it should win the "default" flag.
+  const [saveNewAddress, setSaveNewAddress] = React.useState(true);
+  const [newAddressErrors, setNewAddressErrors] = React.useState<
+    Partial<Record<keyof AddressFormValues, string>>
+  >({});
+
+  const updateNewAddressField = React.useCallback(
+    <K extends keyof AddressFormValues>(
+      field: K,
+      value: AddressFormValues[K],
+    ) => {
+      setNewAddress((prev) => ({ ...prev, [field]: value }));
+      setNewAddressErrors((prev) => {
+        if (!prev[field]) return prev;
+        const next = { ...prev };
+        delete next[field];
+        return next;
+      });
+    },
+    [],
+  );
+
+  const usingNewAddress = selectedAddressId === NEW_ADDRESS_SENTINEL;
+
+  // ─── Payment method (Cash on Delivery) ─────────────────────────────
+  // The storefront only supports COD; we still require an explicit
+  // confirmation tick so the shopper knows what they're committing to.
+  const [codConfirmed, setCodConfirmed] = React.useState(false);
 
   // ─── Place order ───────────────────────────────────────────────────
   const [placing, setPlacing] = React.useState(false);
@@ -371,14 +437,51 @@ export function CheckoutForm({
 
   const handlePlaceOrder = React.useCallback(async () => {
     if (placing) return;
-    if (!selectedAddressId) {
-      setPlaceError("Add a shipping address before placing your order.");
-      return;
-    }
     if (items.length === 0) {
       setPlaceError("Your cart is empty.");
       return;
     }
+    if (!codConfirmed) {
+      setPlaceError(
+        "Please confirm Cash on Delivery before placing your order.",
+      );
+      return;
+    }
+
+    // Build the addressId / inline-address branch of the request body.
+    // Exactly one of the two fields is sent — the server's Zod schema
+    // refuses payloads carrying both.
+    let addressBody:
+      | { addressId: string }
+      | { address: ReturnType<typeof toAddressApiPayload> };
+    if (selectedAddressId === NEW_ADDRESS_SENTINEL) {
+      const parsed = addressFormSchema.safeParse(newAddress);
+      if (!parsed.success) {
+        const fieldErrors: Partial<Record<keyof AddressFormValues, string>> =
+          {};
+        for (const issue of parsed.error.issues) {
+          const key = issue.path[0] as keyof AddressFormValues | undefined;
+          if (key && !fieldErrors[key]) {
+            fieldErrors[key] = issue.message;
+          }
+        }
+        setNewAddressErrors(fieldErrors);
+        setPlaceError(
+          "Please fix the highlighted fields in your shipping address.",
+        );
+        return;
+      }
+      const payload = toAddressApiPayload({
+        ...parsed.data,
+        // The save toggle drives the `isDefault` flag — when ON, the
+        // backend demotes any prior default and promotes this one.
+        isDefault: saveNewAddress,
+      });
+      addressBody = { address: payload };
+    } else {
+      addressBody = { addressId: selectedAddressId };
+    }
+
     setPlacing(true);
     setPlaceError(null);
     try {
@@ -387,7 +490,7 @@ export function CheckoutForm({
         credentials: "same-origin",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          addressId: selectedAddressId,
+          ...addressBody,
           // Single-code-per-order: at most one `discountCode` value here.
           // Server re-validates inside the SERIALIZABLE order transaction.
           discountCode: appliedDiscount?.code ?? null,
@@ -422,10 +525,9 @@ export function CheckoutForm({
       toast.success("Order placed", {
         description: `Thanks! We've sent a confirmation to ${userEmail}.`,
       });
-      // Land on the order history so the shopper can see their new
-      // order. Once a dedicated /account/orders/{id} detail page exists,
-      // we can deep-link straight to it.
-      router.push(`/account/orders?placed=${encodeURIComponent(body.order.id)}`);
+      // Drop the user on the dedicated confirmation page so they get a
+      // proper "thank you" view of the order they just committed.
+      router.push(`/checkout/confirmation/${encodeURIComponent(body.order.id)}`);
       router.refresh();
     } catch (err) {
       const message =
@@ -440,6 +542,9 @@ export function CheckoutForm({
   }, [
     placing,
     selectedAddressId,
+    newAddress,
+    saveNewAddress,
+    codConfirmed,
     items.length,
     appliedDiscount,
     cart,
@@ -474,81 +579,340 @@ export function CheckoutForm({
               </Button>
             </div>
 
-            {!hasAddresses ? (
-              <div className="rounded-lg border border-dashed bg-muted/20 p-6 text-center">
-                <MapPin
-                  className="mx-auto mb-2 h-6 w-6 text-muted-foreground"
-                  aria-hidden="true"
-                />
-                <p className="text-sm font-medium">No saved addresses</p>
-                <p className="mt-1 text-xs text-muted-foreground">
-                  Add a shipping address to your account before placing
-                  this order.
-                </p>
-                <Button asChild size="sm" className="mt-3">
-                  <Link href="/account/addresses">
-                    Add an address
-                  </Link>
-                </Button>
-              </div>
-            ) : (
-              <ul
-                className="space-y-2"
-                role="radiogroup"
-                aria-label="Shipping address"
-                data-testid="checkout-address-options"
-              >
-                {addresses.map((address) => {
-                  const id = `checkout-address-${address.id}`;
-                  const selected = selectedAddressId === address.id;
-                  const lines = formatAddressLines(address);
-                  return (
-                    <li key={address.id}>
-                      <label
-                        htmlFor={id}
-                        className={cn(
-                          "flex cursor-pointer items-start gap-3 rounded-lg border bg-card p-4 transition",
-                          selected
-                            ? "border-primary ring-2 ring-primary/30"
-                            : "hover:border-foreground/30",
-                        )}
-                        data-testid={`checkout-address-${address.id}`}
-                      >
-                        <input
-                          id={id}
-                          type="radio"
-                          name="checkout-address"
-                          value={address.id}
-                          checked={selected}
-                          onChange={() => setSelectedAddressId(address.id)}
-                          className="mt-1 h-4 w-4 cursor-pointer accent-primary"
-                          aria-label={address.label ?? "Address"}
-                        />
-                        <div className="min-w-0 flex-1">
-                          <div className="flex flex-wrap items-center gap-2">
-                            <span className="font-medium">
-                              {address.label ?? "Address"}
-                            </span>
-                            {address.isDefault && (
-                              <Badge variant="success" className="text-[10px] uppercase">
-                                Default
-                              </Badge>
-                            )}
-                          </div>
-                          <address className="mt-1 space-y-0.5 text-xs not-italic text-muted-foreground">
-                            {lines.map((line, i) => (
-                              <div key={i}>{line}</div>
-                            ))}
-                            {address.phone && (
-                              <div className="pt-0.5">{address.phone}</div>
-                            )}
-                          </address>
+            <ul
+              className="space-y-2"
+              role="radiogroup"
+              aria-label="Shipping address"
+              data-testid="checkout-address-options"
+            >
+              {addresses.map((address) => {
+                const id = `checkout-address-${address.id}`;
+                const selected = selectedAddressId === address.id;
+                const lines = formatAddressLines(address);
+                return (
+                  <li key={address.id}>
+                    <label
+                      htmlFor={id}
+                      className={cn(
+                        "flex cursor-pointer items-start gap-3 rounded-lg border bg-card p-4 transition",
+                        selected
+                          ? "border-primary ring-2 ring-primary/30"
+                          : "hover:border-foreground/30",
+                      )}
+                      data-testid={`checkout-address-${address.id}`}
+                    >
+                      <input
+                        id={id}
+                        type="radio"
+                        name="checkout-address"
+                        value={address.id}
+                        checked={selected}
+                        onChange={() => setSelectedAddressId(address.id)}
+                        className="mt-1 h-4 w-4 cursor-pointer accent-primary"
+                        aria-label={address.label ?? "Address"}
+                      />
+                      <div className="min-w-0 flex-1">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="font-medium">
+                            {address.label ?? "Address"}
+                          </span>
+                          {address.isDefault && (
+                            <Badge variant="success" className="text-[10px] uppercase">
+                              Default
+                            </Badge>
+                          )}
                         </div>
-                      </label>
-                    </li>
-                  );
-                })}
-              </ul>
+                        <address className="mt-1 space-y-0.5 text-xs not-italic text-muted-foreground">
+                          {lines.map((line, i) => (
+                            <div key={i}>{line}</div>
+                          ))}
+                          {address.phone && (
+                            <div className="pt-0.5">{address.phone}</div>
+                          )}
+                        </address>
+                      </div>
+                    </label>
+                  </li>
+                );
+              })}
+
+              {/* "Use a new address" radio always lives at the bottom of
+                  the list so shoppers without saved addresses (and
+                  shoppers shipping to a one-off destination) can fill in
+                  a fresh address without leaving checkout. */}
+              <li>
+                <label
+                  htmlFor="checkout-address-new"
+                  className={cn(
+                    "flex cursor-pointer items-start gap-3 rounded-lg border border-dashed bg-card p-4 transition",
+                    usingNewAddress
+                      ? "border-primary ring-2 ring-primary/30"
+                      : "hover:border-foreground/30",
+                  )}
+                  data-testid="checkout-address-new-toggle"
+                >
+                  <input
+                    id="checkout-address-new"
+                    type="radio"
+                    name="checkout-address"
+                    value={NEW_ADDRESS_SENTINEL}
+                    checked={usingNewAddress}
+                    onChange={() =>
+                      setSelectedAddressId(NEW_ADDRESS_SENTINEL)
+                    }
+                    className="mt-1 h-4 w-4 cursor-pointer accent-primary"
+                    aria-label="Use a new address"
+                  />
+                  <div className="min-w-0 flex-1">
+                    <span className="font-medium">
+                      {hasAddresses ? "Use a new address" : "Add a shipping address"}
+                    </span>
+                    <p className="mt-0.5 text-xs text-muted-foreground">
+                      {hasAddresses
+                        ? "Ship this order to a different address."
+                        : "Enter where we should send this order."}
+                    </p>
+                  </div>
+                </label>
+              </li>
+            </ul>
+
+            {usingNewAddress && (
+              <div
+                className="space-y-3 rounded-lg border bg-muted/10 p-4"
+                data-testid="checkout-new-address-form"
+              >
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <div className="space-y-1.5">
+                    <Label htmlFor="new-addr-label" className="text-xs">
+                      Label{" "}
+                      <span className="text-muted-foreground">(optional)</span>
+                    </Label>
+                    <Input
+                      id="new-addr-label"
+                      value={newAddress.label ?? ""}
+                      onChange={(e) =>
+                        updateNewAddressField("label", e.target.value)
+                      }
+                      placeholder="Home, Work, …"
+                      autoComplete="off"
+                      disabled={placing}
+                    />
+                    {newAddressErrors.label && (
+                      <p className="text-xs text-destructive">
+                        {newAddressErrors.label}
+                      </p>
+                    )}
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label htmlFor="new-addr-recipient" className="text-xs">
+                      Recipient{" "}
+                      <span className="text-muted-foreground">(optional)</span>
+                    </Label>
+                    <Input
+                      id="new-addr-recipient"
+                      value={newAddress.recipient ?? ""}
+                      onChange={(e) =>
+                        updateNewAddressField("recipient", e.target.value)
+                      }
+                      placeholder="Full name (if different)"
+                      autoComplete="name"
+                      disabled={placing}
+                    />
+                    {newAddressErrors.recipient && (
+                      <p className="text-xs text-destructive">
+                        {newAddressErrors.recipient}
+                      </p>
+                    )}
+                  </div>
+                </div>
+
+                <div className="space-y-1.5">
+                  <Label htmlFor="new-addr-phone" className="text-xs">
+                    Phone{" "}
+                    <span className="text-muted-foreground">(optional)</span>
+                  </Label>
+                  <Input
+                    id="new-addr-phone"
+                    type="tel"
+                    autoComplete="tel"
+                    value={newAddress.phone ?? ""}
+                    onChange={(e) =>
+                      updateNewAddressField("phone", e.target.value)
+                    }
+                    placeholder="Contact number for delivery"
+                    disabled={placing}
+                  />
+                  {newAddressErrors.phone && (
+                    <p className="text-xs text-destructive">
+                      {newAddressErrors.phone}
+                    </p>
+                  )}
+                </div>
+
+                <div className="space-y-1.5">
+                  <Label htmlFor="new-addr-line1" className="text-xs">
+                    Address line 1
+                  </Label>
+                  <Input
+                    id="new-addr-line1"
+                    value={newAddress.line1}
+                    onChange={(e) =>
+                      updateNewAddressField("line1", e.target.value)
+                    }
+                    placeholder="Street address"
+                    autoComplete="address-line1"
+                    disabled={placing}
+                    aria-invalid={!!newAddressErrors.line1}
+                  />
+                  {newAddressErrors.line1 && (
+                    <p className="text-xs text-destructive">
+                      {newAddressErrors.line1}
+                    </p>
+                  )}
+                </div>
+
+                <div className="space-y-1.5">
+                  <Label htmlFor="new-addr-line2" className="text-xs">
+                    Address line 2{" "}
+                    <span className="text-muted-foreground">(optional)</span>
+                  </Label>
+                  <Input
+                    id="new-addr-line2"
+                    value={newAddress.line2 ?? ""}
+                    onChange={(e) =>
+                      updateNewAddressField("line2", e.target.value)
+                    }
+                    placeholder="Apartment, suite, unit"
+                    autoComplete="address-line2"
+                    disabled={placing}
+                  />
+                  {newAddressErrors.line2 && (
+                    <p className="text-xs text-destructive">
+                      {newAddressErrors.line2}
+                    </p>
+                  )}
+                </div>
+
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <div className="space-y-1.5">
+                    <Label htmlFor="new-addr-city" className="text-xs">
+                      City
+                    </Label>
+                    <Input
+                      id="new-addr-city"
+                      value={newAddress.city}
+                      onChange={(e) =>
+                        updateNewAddressField("city", e.target.value)
+                      }
+                      autoComplete="address-level2"
+                      disabled={placing}
+                      aria-invalid={!!newAddressErrors.city}
+                    />
+                    {newAddressErrors.city && (
+                      <p className="text-xs text-destructive">
+                        {newAddressErrors.city}
+                      </p>
+                    )}
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label htmlFor="new-addr-state" className="text-xs">
+                      State / region{" "}
+                      <span className="text-muted-foreground">(optional)</span>
+                    </Label>
+                    <Input
+                      id="new-addr-state"
+                      value={newAddress.state ?? ""}
+                      onChange={(e) =>
+                        updateNewAddressField("state", e.target.value)
+                      }
+                      autoComplete="address-level1"
+                      disabled={placing}
+                    />
+                    {newAddressErrors.state && (
+                      <p className="text-xs text-destructive">
+                        {newAddressErrors.state}
+                      </p>
+                    )}
+                  </div>
+                </div>
+
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <div className="space-y-1.5">
+                    <Label htmlFor="new-addr-postal" className="text-xs">
+                      Postal code
+                    </Label>
+                    <Input
+                      id="new-addr-postal"
+                      value={newAddress.postalCode}
+                      onChange={(e) =>
+                        updateNewAddressField("postalCode", e.target.value)
+                      }
+                      autoComplete="postal-code"
+                      disabled={placing}
+                      aria-invalid={!!newAddressErrors.postalCode}
+                    />
+                    {newAddressErrors.postalCode && (
+                      <p className="text-xs text-destructive">
+                        {newAddressErrors.postalCode}
+                      </p>
+                    )}
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label htmlFor="new-addr-country" className="text-xs">
+                      Country
+                    </Label>
+                    <Input
+                      id="new-addr-country"
+                      value={newAddress.country}
+                      onChange={(e) =>
+                        updateNewAddressField(
+                          "country",
+                          e.target.value.toUpperCase(),
+                        )
+                      }
+                      autoComplete="country"
+                      placeholder="US"
+                      maxLength={2}
+                      disabled={placing}
+                      aria-invalid={!!newAddressErrors.country}
+                    />
+                    {newAddressErrors.country ? (
+                      <p className="text-xs text-destructive">
+                        {newAddressErrors.country}
+                      </p>
+                    ) : (
+                      <p className="text-xs text-muted-foreground">
+                        Two-letter ISO code (e.g. US).
+                      </p>
+                    )}
+                  </div>
+                </div>
+
+                <label
+                  htmlFor="new-addr-save"
+                  className="flex cursor-pointer items-start gap-3 rounded-md border bg-card p-3"
+                  data-testid="checkout-new-address-save"
+                >
+                  <input
+                    id="new-addr-save"
+                    type="checkbox"
+                    checked={saveNewAddress}
+                    onChange={(e) => setSaveNewAddress(e.target.checked)}
+                    disabled={placing}
+                    className="mt-0.5 h-4 w-4 cursor-pointer accent-primary"
+                  />
+                  <div className="space-y-0.5 text-xs">
+                    <p className="font-medium">
+                      Save this address to my account
+                    </p>
+                    <p className="text-muted-foreground">
+                      We&apos;ll keep it on file as your default so it&apos;s
+                      pre-selected next checkout.
+                    </p>
+                  </div>
+                </label>
+              </div>
             )}
           </CardContent>
         </Card>
@@ -819,6 +1183,57 @@ export function CheckoutForm({
               </div>
             </dl>
 
+            {/* Cash on Delivery is the only payment rail we support. The
+                shopper still has to explicitly tick the confirmation
+                checkbox so there's an unambiguous "I will pay on
+                delivery" gesture before Place Order enables. */}
+            <div
+              className="space-y-2 rounded-md border bg-muted/10 p-3"
+              data-testid="checkout-payment-method"
+            >
+              <div className="flex items-start gap-2">
+                <Banknote
+                  className="mt-0.5 h-4 w-4 text-muted-foreground"
+                  aria-hidden="true"
+                />
+                <div className="min-w-0 flex-1">
+                  <p className="text-sm font-semibold">Cash on Delivery</p>
+                  <p className="text-xs text-muted-foreground">
+                    Pay in cash when your order arrives. No card needed.
+                  </p>
+                </div>
+              </div>
+              <label
+                htmlFor="checkout-cod-confirm"
+                className="flex cursor-pointer items-start gap-2 rounded-md border bg-card p-2.5"
+              >
+                <input
+                  id="checkout-cod-confirm"
+                  type="checkbox"
+                  checked={codConfirmed}
+                  onChange={(e) => {
+                    setCodConfirmed(e.target.checked);
+                    if (e.target.checked && placeError) setPlaceError(null);
+                  }}
+                  disabled={placing}
+                  className="mt-0.5 h-4 w-4 cursor-pointer accent-primary"
+                  data-testid="checkout-cod-checkbox"
+                  aria-describedby="checkout-cod-confirm-help"
+                />
+                <div className="space-y-0.5 text-xs">
+                  <p className="font-medium">
+                    I confirm I will pay cash on delivery.
+                  </p>
+                  <p
+                    id="checkout-cod-confirm-help"
+                    className="text-muted-foreground"
+                  >
+                    The driver will collect the total at the door.
+                  </p>
+                </div>
+              </label>
+            </div>
+
             {placeError && (
               <div
                 role="alert"
@@ -836,8 +1251,8 @@ export function CheckoutForm({
               disabled={
                 placing ||
                 items.length === 0 ||
-                !selectedAddressId ||
-                !hasAddresses
+                !codConfirmed ||
+                (!usingNewAddress && !hasAddresses)
               }
               onClick={handlePlaceOrder}
               data-testid="checkout-place-order"
@@ -847,7 +1262,9 @@ export function CheckoutForm({
               ) : (
                 <Lock className="h-4 w-4" aria-hidden="true" />
               )}
-              {placing ? "Placing order…" : "Place order"}
+              {placing
+                ? "Placing order…"
+                : `Place order — ${formatPrice(totals.totalCents, totals.currency)}`}
             </Button>
 
             <Button
