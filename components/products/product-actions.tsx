@@ -2,13 +2,14 @@
 
 import * as React from "react";
 import { useRouter } from "next/navigation";
-import { Heart, Loader2, Minus, Plus, ShoppingCart } from "lucide-react";
+import { Loader2, Minus, Plus, ShoppingCart } from "lucide-react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { SignInPromptDialog } from "@/components/products/sign-in-prompt-dialog";
+import { WishlistButton } from "@/components/products/wishlist-button";
 import { cn } from "@/lib/client/utils";
 
 /**
@@ -34,32 +35,16 @@ interface CartErrorBody {
   details?: { available?: number; requested?: number; max?: number };
 }
 
-interface WishlistResponse {
-  alreadyExists?: boolean;
-}
-
-interface WishlistErrorBody {
-  error?: string;
-  code?: string;
-}
-
-type Pending = "cart" | "wishlist" | null;
-
 /**
- * Bundle of "add to cart" + "add to wishlist" controls for the PDP.
+ * Bundle of "add to cart" + wishlist toggle controls for the PDP.
  *
  * Behaviour:
- *   - Signed-in shoppers: clicks call the cart/wishlist APIs directly.
- *     Quantity is bounded by `stock` and the per-line cap from the
- *     backend (`MAX_QUANTITY_PER_LINE`).
- *   - Signed-out shoppers: any click opens the sign-in prompt modal
- *     (delegating to /login?next= and /register?next=) instead of
- *     hitting the API. The modal copy is action-specific so the user
- *     understands what's gated.
- *
- * The cart endpoint already enforces stock and per-line caps; we still
- * mirror the cap in the UI so the +/- buttons can disable cleanly
- * before a network round-trip.
+ *   - Signed-in shoppers: the cart button calls /api/cart, the wishlist
+ *     toggle is delegated to the shared `WishlistButton`, which talks to
+ *     the WishlistProvider for optimistic updates and toast feedback.
+ *   - Signed-out shoppers: clicks open a sign-in prompt instead of
+ *     hitting the API. The wishlist sub-component owns its own prompt
+ *     copy; the cart prompt below is specific to checkout.
  */
 export function ProductActions({
   productId,
@@ -73,11 +58,9 @@ export function ProductActions({
   const outOfStock = stock <= 0;
   const cap = Math.max(1, Math.min(stock, MAX_QUANTITY_PER_LINE));
 
-  const [quantity, setQuantity] = React.useState<number>(outOfStock ? 1 : 1);
-  const [pending, setPending] = React.useState<Pending>(null);
-  const [promptKind, setPromptKind] = React.useState<
-    "cart" | "wishlist" | null
-  >(null);
+  const [quantity, setQuantity] = React.useState<number>(1);
+  const [pending, setPending] = React.useState(false);
+  const [cartPromptOpen, setCartPromptOpen] = React.useState(false);
 
   // Bring the quantity back inside the cap if the live stock shrinks.
   React.useEffect(() => {
@@ -100,10 +83,10 @@ export function ProductActions({
   const handleAddToCart = async () => {
     if (outOfStock || pending) return;
     if (!isAuthenticated) {
-      setPromptKind("cart");
+      setCartPromptOpen(true);
       return;
     }
-    setPending("cart");
+    setPending(true);
     try {
       const res = await fetch("/api/cart", {
         method: "POST",
@@ -120,7 +103,7 @@ export function ProductActions({
         }
         if (res.status === 401) {
           // Cookie expired between page load and click.
-          setPromptKind("cart");
+          setCartPromptOpen(true);
           return;
         }
         if (res.status === 409 && body.code === "exceeds_stock") {
@@ -166,60 +149,7 @@ export function ProductActions({
             : "Could not reach the server. Please try again.",
       });
     } finally {
-      setPending(null);
-    }
-  };
-
-  const handleAddToWishlist = async () => {
-    if (pending) return;
-    if (!isAuthenticated) {
-      setPromptKind("wishlist");
-      return;
-    }
-    setPending("wishlist");
-    try {
-      const res = await fetch("/api/wishlist", {
-        method: "POST",
-        credentials: "same-origin",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ productId }),
-      });
-      if (!res.ok) {
-        if (res.status === 401) {
-          setPromptKind("wishlist");
-          return;
-        }
-        let body: WishlistErrorBody = {};
-        try {
-          body = (await res.json()) as WishlistErrorBody;
-        } catch {
-          // ignore
-        }
-        toast.error("Couldn't add to wishlist", {
-          description: body.error ?? "Please try again in a moment.",
-        });
-        return;
-      }
-      const body = (await res.json().catch(() => ({}))) as WishlistResponse;
-      if (body.alreadyExists) {
-        toast.info("Already in your wishlist", {
-          description: `${productName} is already saved to your wishlist.`,
-        });
-      } else {
-        toast.success("Added to wishlist", {
-          description: `${productName} saved to your wishlist.`,
-        });
-      }
-      router.refresh();
-    } catch (err) {
-      toast.error("Network error", {
-        description:
-          err instanceof Error
-            ? err.message
-            : "Could not reach the server. Please try again.",
-      });
-    } finally {
-      setPending(null);
+      setPending(false);
     }
   };
 
@@ -235,7 +165,7 @@ export function ProductActions({
               type="button"
               aria-label="Decrease quantity"
               onClick={decrement}
-              disabled={outOfStock || quantity <= 1 || pending !== null}
+              disabled={outOfStock || quantity <= 1 || pending}
               className="flex h-10 w-10 items-center justify-center text-muted-foreground transition hover:text-foreground disabled:opacity-40"
             >
               <Minus className="h-4 w-4" />
@@ -248,14 +178,14 @@ export function ProductActions({
               max={cap}
               value={quantity}
               onChange={onQuantityChange}
-              disabled={outOfStock || pending !== null}
+              disabled={outOfStock || pending}
               className="h-10 w-14 border-0 px-0 text-center focus-visible:ring-0 focus-visible:ring-offset-0"
             />
             <button
               type="button"
               aria-label="Increase quantity"
               onClick={increment}
-              disabled={outOfStock || quantity >= cap || pending !== null}
+              disabled={outOfStock || quantity >= cap || pending}
               className="flex h-10 w-10 items-center justify-center text-muted-foreground transition hover:text-foreground disabled:opacity-40"
             >
               <Plus className="h-4 w-4" />
@@ -274,51 +204,31 @@ export function ProductActions({
           type="button"
           size="lg"
           onClick={handleAddToCart}
-          disabled={outOfStock || pending === "cart"}
+          disabled={outOfStock || pending}
           className="flex-1"
           data-testid="pdp-add-to-cart"
         >
-          {pending === "cart" ? (
+          {pending ? (
             <Loader2 className="h-4 w-4 animate-spin" />
           ) : (
             <ShoppingCart className="h-4 w-4" />
           )}
           {outOfStock ? "Out of stock" : "Add to cart"}
         </Button>
-        <Button
-          type="button"
-          size="lg"
-          variant="outline"
-          onClick={handleAddToWishlist}
-          disabled={pending === "wishlist"}
-          className="flex-1 sm:flex-none"
-          data-testid="pdp-add-to-wishlist"
-        >
-          {pending === "wishlist" ? (
-            <Loader2 className="h-4 w-4 animate-spin" />
-          ) : (
-            <Heart className="h-4 w-4" />
-          )}
-          Wishlist
-        </Button>
+        <WishlistButton
+          variant="pdp"
+          productId={productId}
+          productName={productName}
+          productSlug={productSlug}
+        />
       </div>
 
       <SignInPromptDialog
-        open={promptKind !== null}
-        onOpenChange={(o) => {
-          if (!o) setPromptKind(null);
-        }}
+        open={cartPromptOpen}
+        onOpenChange={setCartPromptOpen}
         next={next}
-        title={
-          promptKind === "wishlist"
-            ? "Sign in to save to your wishlist"
-            : "Sign in to add to your cart"
-        }
-        description={
-          promptKind === "wishlist"
-            ? "Create an account or sign in to save items for later — they'll be waiting on every device."
-            : "Create an account or sign in to add this item to your cart and check out securely."
-        }
+        title="Sign in to add to your cart"
+        description="Create an account or sign in to add this item to your cart and check out securely."
       />
     </div>
   );

@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { Heart } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { HeaderSearch } from "@/components/site/header-search";
@@ -53,6 +54,18 @@ export async function SiteHeader() {
                   {user.name?.trim() ? user.name : user.email}
                 </span>
               </span>
+              <Button
+                asChild
+                variant="ghost"
+                size="sm"
+                aria-label="View wishlist"
+                title="Wishlist"
+              >
+                <Link href="/wishlist" data-testid="header-wishlist-link">
+                  <Heart className="h-4 w-4" aria-hidden="true" />
+                  <span className="sr-only sm:not-sr-only">Wishlist</span>
+                </Link>
+              </Button>
               <LogoutButton />
             </>
           ) : (
