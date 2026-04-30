@@ -38,6 +38,18 @@ export type WishlistActionResult =
       message?: string;
     };
 
+/**
+ * Per-call mutation options.
+ *
+ * - `silent`: suppress the success toast normally surfaced by the
+ *   provider. Useful when a parent flow (e.g. "move to cart") wants to
+ *   show its own composite toast and avoid double-notifying the user.
+ *   Error toasts are always shown so failures aren't swallowed silently.
+ */
+export interface WishlistMutationOptions {
+  silent?: boolean;
+}
+
 interface WishlistContextValue {
   /** True once the initial GET has resolved (succeeded or 401'd). */
   loaded: boolean;
@@ -47,14 +59,20 @@ interface WishlistContextValue {
   productIds: ReadonlySet<string>;
   /** Convenience predicate. */
   isInWishlist(productId: string): boolean;
-  add(productId: string, productName?: string): Promise<WishlistActionResult>;
+  add(
+    productId: string,
+    productName?: string,
+    options?: WishlistMutationOptions,
+  ): Promise<WishlistActionResult>;
   remove(
     productId: string,
     productName?: string,
+    options?: WishlistMutationOptions,
   ): Promise<WishlistActionResult>;
   toggle(
     productId: string,
     productName?: string,
+    options?: WishlistMutationOptions,
   ): Promise<WishlistActionResult>;
   /** Force a reload from the server. */
   refresh(): Promise<void>;
@@ -132,7 +150,9 @@ export function WishlistProvider({ children }: { children: React.ReactNode }) {
     async (
       productId: string,
       productName?: string,
+      options?: WishlistMutationOptions,
     ): Promise<WishlistActionResult> => {
+      const silent = options?.silent === true;
       // Optimistic insert.
       let alreadyHad = false;
       setProductIds((prev) => {
@@ -188,18 +208,22 @@ export function WishlistProvider({ children }: { children: React.ReactNode }) {
           .json()
           .catch(() => ({}))) as AddResponseBody;
         if (body.alreadyExists) {
-          toast.info("Already in your wishlist", {
-            description: productName
-              ? `${productName} is already saved to your wishlist.`
-              : "This item is already saved.",
-          });
+          if (!silent) {
+            toast.info("Already in your wishlist", {
+              description: productName
+                ? `${productName} is already saved to your wishlist.`
+                : "This item is already saved.",
+            });
+          }
           return { ok: true, action: "kept" };
         }
-        toast.success("Added to wishlist", {
-          description: productName
-            ? `${productName} saved to your wishlist.`
-            : "Saved to your wishlist.",
-        });
+        if (!silent) {
+          toast.success("Added to wishlist", {
+            description: productName
+              ? `${productName} saved to your wishlist.`
+              : "Saved to your wishlist.",
+          });
+        }
         return { ok: true, action: "added" };
       } catch (err) {
         if (!alreadyHad) {
@@ -225,7 +249,9 @@ export function WishlistProvider({ children }: { children: React.ReactNode }) {
     async (
       productId: string,
       productName?: string,
+      options?: WishlistMutationOptions,
     ): Promise<WishlistActionResult> => {
+      const silent = options?.silent === true;
       // Optimistic delete.
       let didHave = false;
       setProductIds((prev) => {
@@ -279,11 +305,13 @@ export function WishlistProvider({ children }: { children: React.ReactNode }) {
           return { ok: false, reason: "error", message: body.error };
         }
         setAuthenticated(true);
-        toast.success("Removed from wishlist", {
-          description: productName
-            ? `${productName} removed from your wishlist.`
-            : "Removed from your wishlist.",
-        });
+        if (!silent) {
+          toast.success("Removed from wishlist", {
+            description: productName
+              ? `${productName} removed from your wishlist.`
+              : "Removed from your wishlist.",
+          });
+        }
         return { ok: true, action: "removed" };
       } catch (err) {
         if (didHave) {
@@ -309,6 +337,7 @@ export function WishlistProvider({ children }: { children: React.ReactNode }) {
     async (
       productId: string,
       productName?: string,
+      options?: WishlistMutationOptions,
     ): Promise<WishlistActionResult> => {
       // Read latest synchronously via setState callback to avoid a stale
       // closure when toggles fire faster than React commits.
@@ -318,8 +347,8 @@ export function WishlistProvider({ children }: { children: React.ReactNode }) {
         return prev;
       });
       return isCurrentlyIn
-        ? remove(productId, productName)
-        : add(productId, productName);
+        ? remove(productId, productName, options)
+        : add(productId, productName, options);
     },
     [add, remove],
   );
