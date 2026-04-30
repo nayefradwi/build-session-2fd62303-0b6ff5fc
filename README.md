@@ -38,3 +38,40 @@ npm run db:migrate    # apply migrations
   input, enforces password rules, hashes with bcrypt, creates the user
   with `role = "user"`, opens a DB-backed session, sets the httpOnly
   session cookie, and returns the public user.
+- `POST /api/auth/login` — `{ email, password }`. Verifies bcrypt hash,
+  rate-limits per (ip + email) to slow brute-force, opens a DB-backed
+  session, and sets the httpOnly `SameSite=Lax` session cookie. Returns
+  the public user. Generic 401 on bad credentials (no email-vs-password
+  disclosure).
+- `POST /api/auth/logout` (also accepts `GET`) — revokes the current
+  session row and clears the cookie. Always 200, even if anonymous.
+
+### Sessions across tabs
+
+The session cookie is `httpOnly`, `SameSite=Lax`, `secure` in production,
+and scoped to `path=/`. Browsers share cookies across all tabs of the
+same origin, so logging in one tab logs in the rest, and logging out
+revokes the session for every tab on the next request they make.
+
+### Rate limiting
+
+`lib/server/rate-limit.ts` ships an in-memory fixed-window limiter used
+by `/api/auth/login`. It is per-instance only — for multi-instance
+deployments swap in a shared store (Redis / Upstash) without changing
+the call sites.
+
+### Token signing
+
+`lib/server/tokens.ts` provides HMAC-SHA256 sign/verify helpers backed
+by `AUTH_SECRET` for any out-of-band signed tokens (CSRF, password
+reset, etc.). The primary session is opaque + DB-backed and does NOT
+use this.
+
+### Protected routes
+
+`middleware.ts` cheaply gates known protected prefixes (`/dashboard`,
+`/account`, `/api/me`, `/api/protected`) by cookie presence — missing
+cookie means a redirect to `/login?next=…` for pages or a 401 JSON
+body for api routes. Handlers must still call `requireUser()` /
+`getCurrentUser()` from `@/lib/server/auth` for the real database-backed
+check.

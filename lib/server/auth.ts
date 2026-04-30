@@ -220,6 +220,37 @@ export async function getCurrentUser(): Promise<User | null> {
 }
 
 /**
+ * Resolve the currently-authenticated session id and user from the
+ * session cookie. Convenience for handlers that need to revoke or
+ * rotate the active session in addition to identifying the user.
+ */
+export async function getCurrentSession(): Promise<
+  { user: User; sessionId: string } | null
+> {
+  const sessionId = await readSessionCookie();
+  if (!sessionId) return null;
+  return getSessionUser(sessionId);
+}
+
+/**
+ * Require an authenticated user. Throws an `AuthRequiredError` that
+ * route handlers can catch and turn into a 401 response. Most code
+ * should prefer the explicit `getCurrentUser()` form.
+ */
+export class AuthRequiredError extends Error {
+  constructor(message = "Authentication required") {
+    super(message);
+    this.name = "AuthRequiredError";
+  }
+}
+
+export async function requireUser(): Promise<User> {
+  const user = await getCurrentUser();
+  if (!user) throw new AuthRequiredError();
+  return user;
+}
+
+/**
  * Strip server-internal fields before returning a user over the wire.
  * The `passwordHash` must never leave the server.
  */
