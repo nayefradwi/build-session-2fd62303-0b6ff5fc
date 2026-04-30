@@ -233,8 +233,41 @@ usage_count + 1` atomically when wired up later.
 `lib/server/email.ts` wraps Resend's REST API via `fetch`. When
 `RESEND_API_KEY` is unset (local dev / CI) the helper logs the rendered
 payload to stdout instead of dispatching, so flows can be exercised
-without provider credentials. The password-reset HTML/text template
-lives alongside the helper in the same module.
+without provider credentials. Templates that ship today:
+
+- `renderPasswordResetEmail()` — used by
+  `POST /api/auth/password-reset/request`.
+- `renderOrderConfirmationEmail()` — used by `POST /api/orders` after a
+  successful checkout. Renders the order number (a short prefix of the
+  UUID), every line item with variant axes and per-line totals, the full
+  pricing breakdown (subtotal, discount, shipping, total), the
+  shipping address, and a "View order" CTA pointing at
+  `${APP_URL}/account/orders/{id}`.
+
+Dispatch helpers:
+
+- `sendEmail(input)` — single-attempt send, throws on non-2xx.
+- `sendEmailWithRetry(input, { maxAttempts, baseDelayMs, maxDelayMs, context })`
+  — retries 5xx + 429 + network errors with exponential backoff and
+  full jitter, logging each attempt and the final outcome under the
+  `[email:send]` tag. Permanent 4xx failures (bad payload, unverified
+  sender, …) abort immediately so we don't burn provider quota on
+  guaranteed-bad sends.
+
+Order-confirmation orchestration lives in `lib/server/order-emails.ts`.
+The route (`POST /api/orders`) calls `sendOrderConfirmationEmail()`
+*after* the SERIALIZABLE checkout commit; the helper renders the
+template, dispatches via `sendEmailWithRetry`, and **never throws** —
+email failures must not turn a successful checkout into a 500. Outcomes
+are tagged `[order-confirmation]` for log triage.
+
+#### Dev template preview
+
+`GET /api/dev/email-preview/order-confirmation` renders the order
+confirmation template with sample data so you can iterate on it in your
+browser. Use `?format=text` for the plain-text variant or
+`?format=json` to dump `{ subject, html, text, input }`. The route is
+disabled (404) when `NODE_ENV === "production"`.
 
 ### Sessions across tabs
 

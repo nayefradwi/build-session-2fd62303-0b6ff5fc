@@ -51,6 +51,7 @@ import {
   createOrderFromCart,
   type CreateOrderError,
 } from "@/lib/server/orders";
+import { sendOrderConfirmationEmail } from "@/lib/server/order-emails";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -247,6 +248,16 @@ export async function POST(req: Request) {
     if (!result.ok) {
       return mutationErrorResponse(result.error);
     }
+
+    // Best-effort confirmation email. The dispatcher already retries
+    // transient provider failures and swallows errors into a logged
+    // result, so a flaky mail provider will never turn a successful
+    // checkout into a 500.
+    await sendOrderConfirmationEmail({
+      order: result.data,
+      recipientEmail: user.email,
+      recipientName: user.name ?? null,
+    });
 
     return NextResponse.json({ order: result.data }, { status: 201 });
   } catch (err) {
