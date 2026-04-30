@@ -23,6 +23,21 @@ export const env = {
   AUTH_SECRET: process.env.AUTH_SECRET ?? "dev-only-insecure-secret",
   SESSION_COOKIE_NAME: process.env.SESSION_COOKIE_NAME ?? "session",
   IS_PROD: isProd,
+  /**
+   * Public URL the app is served from. Used to build absolute links in
+   * outbound email (password reset, etc.). Falls back to localhost in dev.
+   */
+  APP_URL: process.env.APP_URL ?? "http://localhost:3000",
+  /**
+   * Resend API key. Optional — when unset, transactional emails are
+   * logged to stdout instead of dispatched. This keeps local dev frictionless.
+   */
+  RESEND_API_KEY: process.env.RESEND_API_KEY ?? "",
+  /**
+   * "From" address for transactional email. Must be a verified sender
+   * on your Resend account in production.
+   */
+  EMAIL_FROM: process.env.EMAIL_FROM ?? "no-reply@example.com",
 } as const;
 
 export type Env = typeof env;

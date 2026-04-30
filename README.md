@@ -45,6 +45,24 @@ npm run db:migrate    # apply migrations
   disclosure).
 - `POST /api/auth/logout` (also accepts `GET`) — revokes the current
   session row and clears the cookie. Always 200, even if anonymous.
+- `POST /api/auth/password-reset/request` — `{ email }`. Issues a single-
+  use reset token (SHA-256 hash stored in `password_reset_tokens`, raw
+  token delivered via email) valid for 1 hour. Always returns 200 with a
+  generic message regardless of whether the email is registered, to
+  prevent account enumeration. Rate-limited per (ip + email).
+- `POST /api/auth/password-reset/confirm` — `{ token, password }`.
+  Validates the token (not expired / not used), enforces the password
+  policy, sets a new bcrypt hash on the user, marks the token as
+  consumed, invalidates every other outstanding reset token, and revokes
+  all active sessions / refresh tokens so old logins can't be reused.
+
+### Email
+
+`lib/server/email.ts` wraps Resend's REST API via `fetch`. When
+`RESEND_API_KEY` is unset (local dev / CI) the helper logs the rendered
+payload to stdout instead of dispatching, so flows can be exercised
+without provider credentials. The password-reset HTML/text template
+lives alongside the helper in the same module.
 
 ### Sessions across tabs
 

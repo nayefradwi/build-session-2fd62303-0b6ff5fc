@@ -8,6 +8,13 @@
       "when": 1777561306428,
       "tag": "0000_loving_shockwave",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1777561792859,
+      "tag": "0001_password_reset_tokens",
+      "breakpoints": true
     }
   ]
 }

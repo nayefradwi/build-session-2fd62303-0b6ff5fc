@@ -15,7 +15,14 @@ import { and, eq, gt, isNull } from "drizzle-orm";
 import { cookies } from "next/headers";
 
 import { db } from "@/lib/db";
-import { sessions, users, type User } from "@/lib/db/schema";
+import {
+  passwordResetTokens,
+  refreshTokens,
+  sessions,
+  users,
+  type PasswordResetToken,
+  type User,
+} from "@/lib/db/schema";
 import { env } from "@/lib/server/env";
 
 /** Default session lifetime — 7 days. */
@@ -261,3 +268,158 @@ export function publicUser(u: User) {
 }
 
 export type PublicUser = ReturnType<typeof publicUser>;
+
+/**
+ * Password-reset tokens.
+ *
+ * The raw token is what the user receives by email; we store only the
+ * SHA-256 hash. Tokens expire after `PASSWORD_RESET_TTL_SECONDS` (1
+ * hour by default) and become unusable once `usedAt` is set.
+ */
+export const PASSWORD_RESET_TTL_SECONDS = 60 * 60; // 1 hour
+
+/** Bytes of CSPRNG output for the raw reset token. 32 → ~43 char base64url. */
+const PASSWORD_RESET_TOKEN_BYTES = 32;
+
+export interface IssuePasswordResetTokenInput {
+  userId: string;
+  ttlSeconds?: number;
+}
+
+export interface IssuePasswordResetTokenResult {
+  /** The raw token, intended for email delivery. NEVER stored verbatim. */
+  rawToken: string;
+  /** The DB row id. */
+  id: string;
+  expiresAt: Date;
+}
+
+/**
+ * Generate a fresh password-reset token row. Returns the raw token so
+ * the caller can embed it in the outbound email — only the hash hits
+ * the database.
+ */
+export async function issuePasswordResetToken(
+  input: IssuePasswordResetTokenInput,
+): Promise<IssuePasswordResetTokenResult> {
+  const rawToken = randomBytes(PASSWORD_RESET_TOKEN_BYTES).toString("base64url");
+  const tokenHash = hashToken(rawToken);
+  const ttl = input.ttlSeconds ?? PASSWORD_RESET_TTL_SECONDS;
+  const expiresAt = new Date(Date.now() + ttl * 1000);
+
+  const inserted = await db
+    .insert(passwordResetTokens)
+    .values({
+      userId: input.userId,
+      tokenHash,
+      expiresAt,
+    })
+    .returning({ id: passwordResetTokens.id });
+
+  const row = inserted[0];
+  if (!row) {
+    throw new Error("Failed to insert password_reset_tokens row");
+  }
+  return { rawToken, id: row.id, expiresAt };
+}
+
+/**
+ * Find a password-reset token row by raw token. Returns the row only if
+ * it has not expired and has not already been used. The `tokenHash` is
+ * indexed and unique so this is a single-row lookup.
+ */
+export async function findActivePasswordResetToken(
+  rawToken: string,
+): Promise<PasswordResetToken | null> {
+  if (!rawToken) return null;
+  const tokenHash = hashToken(rawToken);
+  const now = new Date();
+
+  const rows = await db
+    .select()
+    .from(passwordResetTokens)
+    .where(
+      and(
+        eq(passwordResetTokens.tokenHash, tokenHash),
+        gt(passwordResetTokens.expiresAt, now),
+        isNull(passwordResetTokens.usedAt),
+      ),
+    )
+    .limit(1);
+  return rows[0] ?? null;
+}
+
+/**
+ * Atomically mark a password-reset token row as consumed. Returns true
+ * when the update affected exactly one not-yet-used row, false when the
+ * token was already used (e.g. a double-submit).
+ *
+ * Using an `isNull(usedAt)` predicate makes this safe under concurrent
+ * confirm requests: only one of them flips `usedAt` from null.
+ */
+export async function consumePasswordResetToken(id: string): Promise<boolean> {
+  const updated = await db
+    .update(passwordResetTokens)
+    .set({ usedAt: new Date() })
+    .where(
+      and(
+        eq(passwordResetTokens.id, id),
+        isNull(passwordResetTokens.usedAt),
+      ),
+    )
+    .returning({ id: passwordResetTokens.id });
+  return updated.length === 1;
+}
+
+/**
+ * Invalidate every outstanding password-reset token for a user. Called
+ * after a successful reset so a leaked-but-unused token can't be redeemed.
+ */
+export async function invalidateAllPasswordResetTokens(
+  userId: string,
+): Promise<void> {
+  await db
+    .update(passwordResetTokens)
+    .set({ usedAt: new Date() })
+    .where(
+      and(
+        eq(passwordResetTokens.userId, userId),
+        isNull(passwordResetTokens.usedAt),
+      ),
+    );
+}
+
+/**
+ * Update a user's password hash and bump `updatedAt`. Used by the
+ * password-reset confirm flow.
+ */
+export async function setUserPasswordHash(
+  userId: string,
+  newHash: string,
+): Promise<void> {
+  await db
+    .update(users)
+    .set({ passwordHash: newHash, updatedAt: new Date() })
+    .where(eq(users.id, userId));
+}
+
+/**
+ * Revoke every active session and refresh token for a user. Called from
+ * the password-reset confirm flow so an attacker who stole a session
+ * can't keep using it after the legitimate owner resets the password.
+ */
+export async function revokeAllUserSessions(userId: string): Promise<void> {
+  const now = new Date();
+  await db
+    .update(sessions)
+    .set({ revokedAt: now })
+    .where(
+      and(eq(sessions.userId, userId), isNull(sessions.revokedAt)),
+    );
+  await db
+    .update(refreshTokens)
+    .set({ revokedAt: now })
+    .where(
+      and(eq(refreshTokens.userId, userId), isNull(refreshTokens.revokedAt)),
+    );
+}
