@@ -570,6 +570,23 @@ export const orders = pgTable(
     /** Sum of `quantity` across every line — denormalised for fast reads. */
     itemCount: integer("item_count").notNull(),
     notes: text("notes"),
+
+    /**
+     * Cancellation snapshot. Populated by the admin "cancel order" flow —
+     * see `lib/server/admin-orders.ts` and `POST /api/admin/orders/{id}/cancel`.
+     *
+     *   - `cancellationReason` free-form admin note (required for cancel).
+     *   - `cancelledAt`        timestamp the admin pressed cancel.
+     *   - `cancelledBy`        the admin's `users.id`. `set null` on delete
+     *                          so removing an admin user does not erase
+     *                          history.
+     */
+    cancellationReason: text("cancellation_reason"),
+    cancelledAt: timestamp("cancelled_at", { withTimezone: true }),
+    cancelledBy: uuid("cancelled_by").references(() => users.id, {
+      onDelete: "set null",
+    }),
+
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
@@ -581,6 +598,10 @@ export const orders = pgTable(
     userIdx: index("orders_user_idx").on(table.userId),
     statusIdx: index("orders_status_idx").on(table.status),
     createdAtIdx: index("orders_created_at_idx").on(table.createdAt),
+    statusCreatedAtIdx: index("orders_status_created_at_idx").on(
+      table.status,
+      table.createdAt,
+    ),
     addressIdx: index("orders_shipping_address_idx").on(table.shippingAddressId),
   }),
 );
@@ -632,10 +653,19 @@ export type NewOrder = typeof orders.$inferInsert;
 export type OrderItem = typeof orderItems.$inferSelect;
 export type NewOrderItem = typeof orderItems.$inferInsert;
 
-/** Order-status vocabulary surfaced to API consumers. */
+/**
+ * Order-status vocabulary surfaced to API consumers.
+ *
+ * `processing` was added by the admin order-management feature
+ * (migration `0010_admin_orders.sql`) — it is the canonical "fulfilment
+ * is underway" state in the admin state machine. Older orders that
+ * captured payment via `POST /api/orders` may still report `paid`; the
+ * admin UI treats the two as equivalent for forward transitions.
+ */
 export const ORDER_STATUSES = [
   "pending",
   "paid",
+  "processing",
   "shipped",
   "delivered",
   "cancelled",
