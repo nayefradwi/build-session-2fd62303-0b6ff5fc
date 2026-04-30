@@ -290,6 +290,58 @@ change on the next request.
   products still reference the category; pass `?force=true` to detach
   them via the `ON DELETE SET NULL` FK.
 
+#### Inventory management
+
+Stock is also writable via the generic product PUT, but inventory has its
+own affordances (audit trail, bulk updates, configurable low-stock
+threshold) that don't belong on the product mutation path. Helpers live
+in `lib/server/inventory.ts`; routes are gated by `requireAdmin()`.
+
+Every successful stock change writes a `stock_adjustments` row with the
+acting admin (`user_id`), signed `delta`, `previous_stock`, `new_stock`,
+and an optional `reason`. The audit log survives product deletion only
+to the extent the FK allows — `stock_adjustments` cascades on product
+delete, while `user_id` is set null on admin delete so the row stays
+readable. The configurable threshold lives in `app_config` under the key
+`inventory.low_stock_threshold` (default 5, settable up to 1,000,000).
+
+- `GET    /api/admin/inventory` — paginated stock view. Query params:
+  `q` (matches name/sku/slug), `categoryId`,
+  `status=any|in|out|low`, `page`, `pageSize` (default 25, max 100).
+  Each row carries `stock`, `inStock`, `outOfStock`, `lowStock`, and the
+  active `lowStockThreshold` so admin UIs can render badges directly.
+  Rows are ordered by stock ascending so the most-at-risk SKUs surface
+  first.
+- `GET    /api/admin/inventory/products/{productId}` — fetch a single
+  inventory row.
+- `PATCH  /api/admin/inventory/products/{productId}` — body
+  `{ stock?: number, delta?: number, reason?: string }`. Either `stock`
+  (absolute set) or `delta` (signed change) must be present (mutually
+  exclusive). Refuses (`409 no_change`) when the requested value matches
+  current stock. Returns the updated inventory row plus the new
+  `stock_adjustments` audit entry.
+- `POST   /api/admin/inventory/bulk` — body
+  `{ updates: [{ productId, stock?, delta?, reason? }, …], defaultReason? }`.
+  Up to 500 lines per call. Each line is independent — a single failure
+  does not roll back the others. Returns `{ applied, failed, results }`
+  with a per-line outcome.
+- `GET    /api/admin/inventory/low-stock` — every product with
+  `stock <= threshold`, ordered by stock ascending. Optional `limit`
+  (default 100, max 500).
+- `GET    /api/admin/inventory/threshold` — returns
+  `{ value, default, max }`.
+- `PUT    /api/admin/inventory/threshold` — body `{ value }`. Upserts
+  the configured low-stock threshold and records the acting admin in
+  `app_config.updated_by`.
+- `GET    /api/admin/inventory/adjustments` — paginated audit log.
+  Optional `productId`, `userId`, `page`, `pageSize` (default 50, max
+  200). Each item carries the actor's email when still resolvable.
+
+The single-product PATCH uses an optimistic-locking UPDATE
+(`WHERE id = $1 AND stock = $previous`) so a concurrent writer (the
+checkout pipeline, another admin) cannot race past the value the actor
+authorised — losers receive `404 not_found`, prompting a fresh read.
+
 #### Image upload
 
 Image binaries are persisted to **Vercel Blob** via

@@ -712,3 +712,93 @@ export const reviews = pgTable(
 
 export type Review = typeof reviews.$inferSelect;
 export type NewReview = typeof reviews.$inferInsert;
+
+/**
+ * Audit log of every stock change applied through the admin inventory API.
+ *
+ * One row per write — the inventory helpers always insert here whenever a
+ * `products.stock` field is updated. Each row records:
+ *
+ *   - `delta`         signed integer; positive on restocks, negative on
+ *                     manual decrements (e.g. damage write-offs). The
+ *                     route layer derives this from the requested change
+ *                     before issuing the UPDATE so the log and the column
+ *                     stay consistent.
+ *   - `previousStock` `products.stock` before the change.
+ *   - `newStock`      `products.stock` after the change.
+ *   - `reason`        free-form admin note. Optional, capped at 500 chars.
+ *   - `userId`        the admin who issued the change. `set null` on
+ *                     delete so removing an admin user does not erase the
+ *                     log entries they wrote.
+ *   - `productId`     the affected product. Cascades on delete: removing
+ *                     a product deletes its adjustment history because
+ *                     the rows are no longer joinable to anything useful.
+ *   - `createdAt`     when the change was applied.
+ */
+export const stockAdjustments = pgTable(
+  "stock_adjustments",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    productId: uuid("product_id")
+      .notNull()
+      .references(() => products.id, { onDelete: "cascade" }),
+    userId: uuid("user_id").references(() => users.id, {
+      onDelete: "set null",
+    }),
+    delta: integer("delta").notNull(),
+    previousStock: integer("previous_stock").notNull(),
+    newStock: integer("new_stock").notNull(),
+    reason: varchar("reason", { length: 500 }),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => ({
+    productIdx: index("stock_adjustments_product_idx").on(table.productId),
+    userIdx: index("stock_adjustments_user_idx").on(table.userId),
+    createdAtIdx: index("stock_adjustments_created_at_idx").on(table.createdAt),
+    productCreatedAtIdx: index("stock_adjustments_product_created_at_idx").on(
+      table.productId,
+      table.createdAt,
+    ),
+  }),
+);
+
+export type StockAdjustment = typeof stockAdjustments.$inferSelect;
+export type NewStockAdjustment = typeof stockAdjustments.$inferInsert;
+
+/**
+ * Generic key/value store for app-wide configuration.
+ *
+ * Used by the admin inventory API to persist a configurable low-stock
+ * threshold (key: `inventory.low_stock_threshold`, value: numeric string).
+ * The shape is deliberately generic — any future scalar setting (default
+ * shipping rate, feature flag, etc.) can ride on the same table without
+ * a fresh migration.
+ *
+ * Conventions:
+ *   - `key`        dotted lower-case identifier ("inventory.low_stock_threshold").
+ *                  Unique; lookups are an equality probe.
+ *   - `value`      stored as text. Numeric values are serialised as
+ *                  base-10 strings; complex values may use JSON. The
+ *                  route layer is responsible for parse/format.
+ *   - `updatedBy`  uuid of the admin that wrote the value last. `set null`
+ *                  on delete so removing the admin does not erase the
+ *                  setting itself.
+ */
+export const appConfig = pgTable(
+  "app_config",
+  {
+    key: varchar("key", { length: 120 }).primaryKey(),
+    value: text("value").notNull(),
+    updatedBy: uuid("updated_by").references(() => users.id, {
+      onDelete: "set null",
+    }),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+);
+
+export type AppConfig = typeof appConfig.$inferSelect;
+export type NewAppConfig = typeof appConfig.$inferInsert;

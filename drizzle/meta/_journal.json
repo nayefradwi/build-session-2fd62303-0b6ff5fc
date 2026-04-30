@@ -64,6 +64,13 @@
       "when": 1777565794847,
       "tag": "0008_reviews",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1777566945682,
+      "tag": "0009_stock_adjustments",
+      "breakpoints": true
     }
   ]
 }
