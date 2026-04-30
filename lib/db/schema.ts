@@ -432,3 +432,71 @@ export const cartItems = pgTable(
 
 export type CartItem = typeof cartItems.$inferSelect;
 export type NewCartItem = typeof cartItems.$inferInsert;
+
+/**
+ * Discount codes (admin-managed promo codes).
+ *
+ * One row per redeemable code. The code itself is a short, human-readable
+ * string that the shopper types at checkout — it is stored in upper-case
+ * form to make case-insensitive lookups a simple equality probe, with a
+ * unique index ensuring no two codes collide.
+ *
+ * Fields:
+ *   - `code`             the redeemable token (uppercased on insert).
+ *   - `type`             discount kind: "percentage" or "fixed".
+ *                        `percentage` interprets `value` as a 1-100 integer
+ *                        percent; `fixed` interprets `value` as cents.
+ *   - `value`            integer; meaning depends on `type`. Stored in the
+ *                        smallest unit so we never deal with floats.
+ *   - `minOrderValue`    minimum subtotal (in CENTS) for the code to apply.
+ *                        Null / zero means no minimum.
+ *   - `expiresAt`        UTC timestamp after which the code is no longer
+ *                        redeemable. Nullable — codes with no expiry are
+ *                        valid forever (until manually deactivated).
+ *   - `isActive`         soft on/off switch. An inactive code is rejected
+ *                        even if it is otherwise valid (not expired and
+ *                        within usage limits).
+ *   - `usageLimit`       optional cap on the total number of redemptions.
+ *                        Nullable means "unlimited". When set, redemptions
+ *                        bump `usageCount` and the code is rejected once
+ *                        the count reaches the limit.
+ *   - `usageCount`       running tally of successful redemptions; bumped
+ *                        atomically by the (forthcoming) checkout flow.
+ *   - `description`      optional admin-only memo (label, marketing copy,
+ *                        campaign reference, etc.). Not surfaced to shoppers.
+ *
+ * The "currently usable" predicate is computed at read time — the table
+ * deliberately stores raw facts so an admin can edit any field without
+ * having to recompute a status column. The query helper exposes a
+ * `status` enum (`active` | `inactive` | `expired` | `exhausted`)
+ * suitable for the admin list view.
+ */
+export const discountCodes = pgTable(
+  "discount_codes",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    code: varchar("code", { length: 64 }).notNull().unique(),
+    type: varchar("type", { length: 16 }).notNull(),
+    value: integer("value").notNull(),
+    minOrderValue: integer("min_order_value"),
+    expiresAt: timestamp("expires_at", { withTimezone: true }),
+    isActive: boolean("is_active").notNull().default(true),
+    usageLimit: integer("usage_limit"),
+    usageCount: integer("usage_count").notNull().default(0),
+    description: text("description"),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => ({
+    codeIdx: index("discount_codes_code_idx").on(table.code),
+    activeIdx: index("discount_codes_active_idx").on(table.isActive),
+    expiresIdx: index("discount_codes_expires_idx").on(table.expiresAt),
+  }),
+);
+
+export type DiscountCode = typeof discountCodes.$inferSelect;
+export type NewDiscountCode = typeof discountCodes.$inferInsert;

@@ -43,6 +43,13 @@
       "when": 1777563200985,
       "tag": "0005_cart_items",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1777563400839,
+      "tag": "0006_discount_codes",
+      "breakpoints": true
     }
   ]
 }

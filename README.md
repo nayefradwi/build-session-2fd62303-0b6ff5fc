@@ -150,6 +150,39 @@ partial-unique-index pattern as the wishlist. If a concurrent insert
 would otherwise collide, the helper falls back to updating the row that
 won the race using the original mode (increment vs set).
 
+### Discount codes (admin)
+
+Admin-managed promo codes live in the `discount_codes` table. Each row
+has a redeemable `code` (uppercased on insert), a `type`
+(`percentage` | `fixed`) + integer `value` (percent or cents depending
+on the type), an optional `minOrderValue`, an optional `expiresAt`, an
+`isActive` toggle, and an optional `usageLimit` paired with a running
+`usageCount`. The list endpoint exposes a derived `status`
+(`active` | `inactive` | `expired` | `exhausted`) and `usageRemaining`
+so the admin UI can render the table without recomputing the
+"currently usable?" predicate.
+
+- `GET    /api/admin/discount-codes` — list with `q`, `status`, `page`,
+  `pageSize` query params. Returns `{ items, page, pageSize, total,
+  totalPages, hasMore }` where each item carries the derived status.
+- `POST   /api/admin/discount-codes` — create. Body: `{ code, type,
+  value, minOrderValue?, expiresAt?, isActive?, usageLimit?,
+  description? }`. Returns 201 with the new row, 400 on validation,
+  409 if the code is already taken.
+- `GET    /api/admin/discount-codes/{id}` — fetch a single code.
+- `PUT    /api/admin/discount-codes/{id}` — partial update (body must
+  include at least one of the writable fields). Same validation +
+  uniqueness handling as create.
+- `DELETE /api/admin/discount-codes/{id}` — hard delete. Returns 200
+  `{ ok: true }` on success, 404 when the id is unknown.
+
+Every endpoint is gated by `requireAdmin()` (defined in
+`lib/server/auth.ts`): unauthenticated callers receive 401, signed-in
+non-admins receive 403. The shopper-facing redemption flow that
+increments `usageCount` is intentionally out of scope for this task —
+the column exists today so checkout can `UPDATE … SET usage_count =
+usage_count + 1` atomically when wired up later.
+
 ### Email
 
 `lib/server/email.ts` wraps Resend's REST API via `fetch`. When

@@ -258,6 +258,35 @@ export async function requireUser(): Promise<User> {
 }
 
 /**
+ * Thrown when an authenticated user is present but lacks the role
+ * required to access an admin-only route. Route handlers map this to a
+ * 403 response. Distinct from `AuthRequiredError` so the route layer can
+ * pick the right HTTP status without inspecting message text.
+ */
+export class ForbiddenError extends Error {
+  constructor(message = "Forbidden") {
+    super(message);
+    this.name = "ForbiddenError";
+  }
+}
+
+/** Convenience predicate. Centralised so the role check has one source. */
+export function isAdmin(user: Pick<User, "role"> | null | undefined): boolean {
+  return user?.role === "admin";
+}
+
+/**
+ * Require an authenticated user with the `admin` role. Throws
+ * `AuthRequiredError` (→ 401) if no user is logged in, `ForbiddenError`
+ * (→ 403) if the user is logged in but not an admin.
+ */
+export async function requireAdmin(): Promise<User> {
+  const user = await requireUser();
+  if (!isAdmin(user)) throw new ForbiddenError("Admin role required");
+  return user;
+}
+
+/**
  * Strip server-internal fields before returning a user over the wire.
  * The `passwordHash` must never leave the server.
  */
