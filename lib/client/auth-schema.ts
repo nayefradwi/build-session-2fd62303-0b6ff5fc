@@ -34,6 +34,25 @@ export const registerFormSchema = z.object({
 export type RegisterFormValues = z.infer<typeof registerFormSchema>;
 
 /**
+ * Zod schema for the login form.
+ *
+ * We intentionally do NOT enforce the registration password rules here —
+ * an existing account may have been created under different rules, and
+ * we'd rather show the server's "Invalid email or password" response
+ * than block submission client-side.
+ */
+export const loginFormSchema = z.object({
+  email: z
+    .string()
+    .trim()
+    .min(1, "Email is required")
+    .email("Enter a valid email address"),
+  password: z.string().min(1, "Password is required").max(1024),
+});
+
+export type LoginFormValues = z.infer<typeof loginFormSchema>;
+
+/**
  * Computed password strength on a 0–4 scale plus a label.
  *
  * The thresholds are intentionally simple — this is UX feedback, not a

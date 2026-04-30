@@ -99,17 +99,41 @@ check.
 Stack: Next.js 15 App Router, Tailwind CSS, shadcn/ui, react-hook-form +
 zod, sonner toasts.
 
-- `app/layout.tsx` — root layout, mounts `<Toaster />` from sonner.
-- `app/page.tsx` — landing page with a "Create account" CTA.
+- `app/layout.tsx` — root layout, mounts `<SiteHeader />` and the
+  `<Toaster />` from sonner.
+- `app/page.tsx` — landing page; tailors hero copy + CTAs to whether
+  the visitor is signed in (resolved via `getCurrentUser()`).
 - `app/(site)/register/page.tsx` — `/register` route. Reads a
   same-origin `?redirect=` query param and forwards it to the form.
+- `app/(site)/login/page.tsx` — `/login` route. Reads same-origin
+  `?next=` (the value middleware redirects with) or `?redirect=` and
+  forwards a sanitised path to the form.
 - `components/auth/register-form.tsx` — client component that submits
   to `POST /api/auth/register`. The session cookie is set by the API,
   so on success we just `router.replace(redirectTo)` and refresh.
+- `components/auth/login-form.tsx` — client component that submits to
+  `POST /api/auth/login`. Surfaces invalid-credentials errors back
+  into both fields plus a toast, treats 429 as a "too many attempts"
+  toast, and on success calls `router.replace(redirectTo)` followed
+  by `router.refresh()` so server components (the header) re-render
+  with the new auth state.
 - `components/auth/password-strength-meter.tsx` — visual strength
   feedback driven by `lib/client/auth-schema.ts#passwordStrength`.
-- `lib/client/auth-schema.ts` — zod schema mirroring the server's
-  password rules, plus the strength heuristic.
+- `components/site/site-header.tsx` — server component header that
+  reads `getCurrentUser()` and shows either a greeting + sign-out
+  button (logged in) or sign-in / create-account CTAs (logged out).
+- `components/site/logout-button.tsx` — client component; POSTs to
+  `/api/auth/logout` and refreshes so the header re-renders.
+- `lib/client/auth-schema.ts` — zod schemas (register + login)
+  mirroring the server's rules, plus the password-strength heuristic.
 - `lib/client/utils.ts` — `cn()` (clsx + tailwind-merge).
 - `components/ui/*` — shadcn/ui primitives (button, input, label,
   card, form, sonner toaster).
+
+### Cross-tab session state
+
+The auth header relies on the same httpOnly + `SameSite=Lax` + `path=/`
+session cookie set by the API routes, so all tabs on the same origin
+share the auth state. After a successful sign-in / sign-out we call
+`router.refresh()` to re-render the server-rendered header in the
+current tab; other tabs pick up the new state on their next request.
