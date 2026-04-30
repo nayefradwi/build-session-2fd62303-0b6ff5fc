@@ -6,10 +6,19 @@ import { ChevronRight, ShieldCheck, Star, Truck } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { ProductActions } from "@/components/products/product-actions";
 import { ProductGallery } from "@/components/products/product-gallery";
+import {
+  ProductReviews,
+  type ReviewEligibility,
+} from "@/components/products/product-reviews";
 import { RelatedProducts } from "@/components/products/related-products";
 import { formatPrice, formatRating } from "@/lib/client/format";
 import { getCurrentUser } from "@/lib/server/auth";
 import { getProductByIdOrSlug } from "@/lib/server/products";
+import {
+  findReview,
+  listReviewsForProduct,
+  userHasPurchasedProduct,
+} from "@/lib/server/reviews";
 
 export const dynamic = "force-dynamic";
 
@@ -75,6 +84,38 @@ export default async function ProductDetailPage({ params }: PageProps) {
 
   if (!product) {
     notFound();
+  }
+
+  // Reviews payload + eligibility decision are computed server-side so
+  // the first paint already has the form (or the right not-eligible
+  // callout) without an extra client-side round trip.
+  const initialReviews = await listReviewsForProduct({
+    productId: product.id,
+    page: 1,
+    pageSize: 10,
+  }).catch(() => ({
+    items: [],
+    page: 1,
+    pageSize: 10,
+    total: 0,
+    totalPages: 0,
+    hasMore: false,
+    summary: { average: product.rating.average, count: product.rating.count },
+  }));
+
+  let reviewEligibility: ReviewEligibility = "unauthenticated";
+  if (user) {
+    const [existing, purchased] = await Promise.all([
+      findReview(user.id, product.id).catch(() => null),
+      userHasPurchasedProduct(user.id, product.id).catch(() => false),
+    ]);
+    if (existing) {
+      reviewEligibility = "already_reviewed";
+    } else if (purchased) {
+      reviewEligibility = "eligible";
+    } else {
+      reviewEligibility = "not_purchased";
+    }
   }
 
   const price = formatPrice(product.priceCents, product.currency);
@@ -284,6 +325,13 @@ export default async function ProductDetailPage({ params }: PageProps) {
           </p>
         </section>
       )}
+
+      <ProductReviews
+        productId={product.id}
+        productSlug={product.slug}
+        initialReviews={initialReviews}
+        initialEligibility={reviewEligibility}
+      />
 
       {product.related.length > 0 && (
         <div className="mt-16">
