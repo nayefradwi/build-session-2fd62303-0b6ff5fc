@@ -99,6 +99,22 @@ so the index is never violated.
   tie-breaker. The `related` query parameter overrides the default
   count (8, capped at 24).
 
+#### Wishlist
+
+- `GET /api/wishlist` — list every wishlist entry for the authenticated
+  user, newest-first. Each entry embeds a product summary with
+  `priceCents`, `currency`, `compareAtPriceCents`, `stock`, `inStock`,
+  and a coarse-grained `stockStatus` of `in_stock` | `low_stock` |
+  `out_of_stock`. 401 if unauthenticated.
+- `POST /api/wishlist` — `{ productId }`. Adds a product to the
+  authenticated user's wishlist. Returns 201 on insert, 200 with
+  `alreadyExists: true` if the product was already wishlisted (the
+  unique index `(user_id, product_id)` also guards against concurrent
+  duplicate inserts), and 404 if the supplied product id is unknown.
+- `DELETE /api/wishlist/{productId}` — remove the entry that pairs the
+  authenticated user with the supplied product id. 200 on success, 404
+  if no such entry exists, 401 if unauthenticated.
+
 ### Email
 
 `lib/server/email.ts` wraps Resend's REST API via `fetch`. When

@@ -319,6 +319,47 @@ export const productImages = pgTable(
   }),
 );
 
+/**
+ * Wishlist items.
+ *
+ * A wishlist row pins a single product to a single user. The pair
+ * `(user_id, product_id)` is the natural key — a user cannot wishlist the
+ * same product twice. We enforce that with a unique index, AND the route
+ * layer pre-checks for an existing row so callers receive a clean 409
+ * instead of a generic constraint-violation error.
+ *
+ * Both foreign keys cascade on delete:
+ *   - deleting the user removes their wishlist
+ *   - deleting the product removes every wishlist row that referenced it
+ *
+ * The `createdAt` column lets the GET endpoint return rows in
+ * "most-recently-added first" order without an extra sort key.
+ */
+export const wishlistItems = pgTable(
+  "wishlist_items",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    productId: uuid("product_id")
+      .notNull()
+      .references(() => products.id, { onDelete: "cascade" }),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => ({
+    userIdx: index("wishlist_items_user_idx").on(table.userId),
+    productIdx: index("wishlist_items_product_idx").on(table.productId),
+    // Prevent duplicates: a user can wishlist a given product at most once.
+    userProductIdx: uniqueIndex("wishlist_items_user_product_idx").on(
+      table.userId,
+      table.productId,
+    ),
+  }),
+);
+
 export type User = typeof users.$inferSelect;
 export type NewUser = typeof users.$inferInsert;
 export type Session = typeof sessions.$inferSelect;
@@ -335,3 +376,5 @@ export type Product = typeof products.$inferSelect;
 export type NewProduct = typeof products.$inferInsert;
 export type ProductImage = typeof productImages.$inferSelect;
 export type NewProductImage = typeof productImages.$inferInsert;
+export type WishlistItem = typeof wishlistItems.$inferSelect;
+export type NewWishlistItem = typeof wishlistItems.$inferInsert;
