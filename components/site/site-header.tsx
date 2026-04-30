@@ -1,6 +1,7 @@
 import Link from "next/link";
 
 import { Button } from "@/components/ui/button";
+import { HeaderSearch } from "@/components/site/header-search";
 import { LogoutButton } from "@/components/site/logout-button";
 import { getCurrentUser } from "@/lib/server/auth";
 
@@ -24,15 +25,21 @@ export async function SiteHeader() {
 
   return (
     <header className="sticky top-0 z-40 w-full border-b bg-background/80 backdrop-blur supports-[backdrop-filter]:bg-background/60">
-      <div className="mx-auto flex h-14 max-w-5xl items-center justify-between px-4">
+      <div className="mx-auto flex h-14 max-w-5xl items-center gap-3 px-4 sm:gap-4">
         <Link
           href="/"
-          className="text-sm font-semibold tracking-tight hover:text-primary"
+          className="shrink-0 text-sm font-semibold tracking-tight hover:text-primary"
         >
           Build Session
         </Link>
+        {/* Site-wide search — submits to /search. Hidden on the very
+            narrowest screens (where it gets its own row below) so the
+            auth nav still has room to breathe. */}
+        <div className="hidden flex-1 justify-center sm:flex">
+          <HeaderSearch />
+        </div>
         <nav
-          className="flex items-center gap-2"
+          className="ml-auto flex items-center gap-2 sm:ml-0"
           aria-label="Account navigation"
         >
           {user ? (
@@ -59,6 +66,11 @@ export async function SiteHeader() {
             </>
           )}
         </nav>
+      </div>
+      {/* Mobile search row — shown only when the inline header search
+          is hidden so /search is always one tap away. */}
+      <div className="border-t px-4 py-2 sm:hidden">
+        <HeaderSearch className="max-w-none" />
       </div>
     </header>
   );
