@@ -75,3 +75,23 @@ cookie means a redirect to `/login?next=…` for pages or a 401 JSON
 body for api routes. Handlers must still call `requireUser()` /
 `getCurrentUser()` from `@/lib/server/auth` for the real database-backed
 check.
+
+## Frontend
+
+Stack: Next.js 15 App Router, Tailwind CSS, shadcn/ui, react-hook-form +
+zod, sonner toasts.
+
+- `app/layout.tsx` — root layout, mounts `<Toaster />` from sonner.
+- `app/page.tsx` — landing page with a "Create account" CTA.
+- `app/(site)/register/page.tsx` — `/register` route. Reads a
+  same-origin `?redirect=` query param and forwards it to the form.
+- `components/auth/register-form.tsx` — client component that submits
+  to `POST /api/auth/register`. The session cookie is set by the API,
+  so on success we just `router.replace(redirectTo)` and refresh.
+- `components/auth/password-strength-meter.tsx` — visual strength
+  feedback driven by `lib/client/auth-schema.ts#passwordStrength`.
+- `lib/client/auth-schema.ts` — zod schema mirroring the server's
+  password rules, plus the strength heuristic.
+- `lib/client/utils.ts` — `cn()` (clsx + tailwind-merge).
+- `components/ui/*` — shadcn/ui primitives (button, input, label,
+  card, form, sonner toaster).
