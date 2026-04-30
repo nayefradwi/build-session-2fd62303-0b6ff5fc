@@ -689,3 +689,224 @@ export async function deleteDiscountCode(id: string): Promise<boolean> {
     .returning({ id: discountCodes.id });
   return removed.length > 0;
 }
+
+/**
+ * Compute the discount amount (in cents) for a (type, value, subtotal)
+ * triple. Returns an integer in [0, subtotalCents]:
+ *
+ *   - percentage: `floor(subtotalCents * value / 100)`. Floor (not round)
+ *     is the conservative choice — never charge less than the math
+ *     warrants. Capped at `subtotalCents` so a 100%+ percent (which the
+ *     create/update validators already block) cannot return more than the
+ *     order total.
+ *   - fixed: `value` clamped to `[0, subtotalCents]`. If the fixed amount
+ *     exceeds the order, the order goes to zero rather than negative.
+ *
+ * A non-positive subtotal short-circuits to 0 so callers can call this on
+ * an empty cart without worrying.
+ */
+export function computeDiscountAmountCents(
+  type: DiscountType,
+  value: number,
+  subtotalCents: number,
+): number {
+  if (!Number.isFinite(subtotalCents) || subtotalCents <= 0) return 0;
+  if (type === "percentage") {
+    const amount = Math.floor((subtotalCents * value) / 100);
+    return Math.min(subtotalCents, Math.max(0, amount));
+  }
+  // fixed
+  return Math.min(subtotalCents, Math.max(0, value));
+}
+
+/**
+ * Why a discount code couldn't be applied. The "reason" axis is
+ * deliberately enumerated so the client can render a precise message
+ * ("This code expired on…", "This code requires a $50 minimum", etc.)
+ * instead of a generic "invalid code" string.
+ *
+ *   - `not_found`           — no row matches the (normalised) code.
+ *   - `inactive`            — `isActive = false` (admin-disabled).
+ *   - `expired`             — `expiresAt <= now`.
+ *   - `exhausted`           — `usageCount >= usageLimit`.
+ *   - `min_order_not_met`   — supplied subtotal < `minOrderValue`.
+ *   - `validation_failed`   — request payload is malformed (e.g. negative
+ *                             subtotal, missing code).
+ */
+export type DiscountValidationError =
+  | { code: "not_found" }
+  | { code: "inactive" }
+  | { code: "expired"; expiresAt: string }
+  | { code: "exhausted"; usageLimit: number; usageCount: number }
+  | {
+      code: "min_order_not_met";
+      minOrderValue: number;
+      subtotalCents: number;
+    }
+  | {
+      code: "validation_failed";
+      message: string;
+      fields?: Record<string, string[]>;
+    };
+
+/**
+ * Normalised representation of a successfully validated discount code.
+ * The shape is what a checkout/cart UI needs to render the "Promo
+ * applied" line item — no DB-only columns leak through.
+ */
+export interface NormalizedDiscount {
+  id: string;
+  code: string;
+  type: DiscountType;
+  value: number;
+  minOrderValue: number | null;
+  expiresAt: string | null;
+  description: string | null;
+  /**
+   * The discount amount, in cents, derived against `subtotalCents`. This
+   * is a snapshot — re-validating against a different subtotal can return
+   * a different amount (e.g. the cart changed since the last check).
+   */
+  amountCents: number;
+  /** Subtotal that produced the amount above. */
+  subtotalCents: number;
+  /** `subtotalCents - amountCents`, clamped to >= 0. */
+  subtotalAfterDiscountCents: number;
+  /** Currency of the subtotal. Echoed for client display convenience. */
+  currency: string;
+}
+
+export type DiscountValidationResult =
+  | { ok: true; data: NormalizedDiscount }
+  | { ok: false; error: DiscountValidationError };
+
+export interface ValidateDiscountCodeInput {
+  /** The redeemable token typed by the shopper. Normalised internally. */
+  code: string;
+  /** Cart subtotal in cents. Must be a non-negative integer. */
+  subtotalCents: number;
+  /** Currency tag echoed back on success. Defaults to "USD". */
+  currency?: string;
+  /** Override "now" — useful for tests. */
+  now?: Date;
+}
+
+/**
+ * Validate a redeemable discount code against a cart subtotal.
+ *
+ * Stateless and side-effect-free: this function does NOT bump
+ * `usageCount` — that must happen at the moment of checkout commit, by a
+ * future order-creation flow that consumes the code under a transaction.
+ *
+ * The single-code-per-cart invariant is enforced by the request shape
+ * (one code per call) and by the route layer not persisting any "applied
+ * code" state — the client tracks the active code locally and re-submits
+ * it (or a different one) on each subtotal change.
+ */
+export async function validateDiscountCode(
+  input: ValidateDiscountCodeInput,
+): Promise<DiscountValidationResult> {
+  const now = input.now ?? new Date();
+  const currency = input.currency ?? "USD";
+
+  // Payload validation. We surface clear field errors for the obviously
+  // malformed inputs (missing/empty code, non-integer subtotal) before
+  // hitting the database.
+  const fields: Record<string, string[]> = {};
+  if (typeof input.code !== "string" || input.code.trim().length === 0) {
+    pushError(fields, "code", "code is required");
+  }
+  if (
+    !Number.isFinite(input.subtotalCents) ||
+    !Number.isInteger(input.subtotalCents) ||
+    input.subtotalCents < 0
+  ) {
+    pushError(
+      fields,
+      "subtotalCents",
+      "subtotalCents must be a non-negative integer (cents)",
+    );
+  }
+  if (Object.keys(fields).length > 0) {
+    return {
+      ok: false,
+      error: {
+        code: "validation_failed",
+        message: "Invalid validate-discount payload",
+        fields,
+      },
+    };
+  }
+
+  const normalized = normalizeCode(input.code);
+  // Lengths / characters that could never match a stored code short-circuit
+  // to a clean `not_found` rather than executing a guaranteed-empty query.
+  if (
+    normalized.length < DISCOUNT_CODE_LIMITS.codeMinLength ||
+    normalized.length > DISCOUNT_CODE_LIMITS.codeMaxLength ||
+    !CODE_PATTERN.test(normalized)
+  ) {
+    return { ok: false, error: { code: "not_found" } };
+  }
+
+  const row = await findDiscountCodeByCode(normalized);
+  if (!row) return { ok: false, error: { code: "not_found" } };
+
+  if (!row.isActive) return { ok: false, error: { code: "inactive" } };
+
+  if (row.expiresAt && row.expiresAt.getTime() <= now.getTime()) {
+    return {
+      ok: false,
+      error: { code: "expired", expiresAt: row.expiresAt.toISOString() },
+    };
+  }
+
+  if (row.usageLimit !== null && row.usageCount >= row.usageLimit) {
+    return {
+      ok: false,
+      error: {
+        code: "exhausted",
+        usageLimit: row.usageLimit,
+        usageCount: row.usageCount,
+      },
+    };
+  }
+
+  if (
+    row.minOrderValue !== null &&
+    row.minOrderValue > 0 &&
+    input.subtotalCents < row.minOrderValue
+  ) {
+    return {
+      ok: false,
+      error: {
+        code: "min_order_not_met",
+        minOrderValue: row.minOrderValue,
+        subtotalCents: input.subtotalCents,
+      },
+    };
+  }
+
+  const amountCents = computeDiscountAmountCents(
+    row.type as DiscountType,
+    row.value,
+    input.subtotalCents,
+  );
+
+  return {
+    ok: true,
+    data: {
+      id: row.id,
+      code: row.code,
+      type: row.type as DiscountType,
+      value: row.value,
+      minOrderValue: row.minOrderValue ?? null,
+      expiresAt: row.expiresAt ? row.expiresAt.toISOString() : null,
+      description: row.description ?? null,
+      amountCents,
+      subtotalCents: input.subtotalCents,
+      subtotalAfterDiscountCents: Math.max(0, input.subtotalCents - amountCents),
+      currency,
+    },
+  };
+}
