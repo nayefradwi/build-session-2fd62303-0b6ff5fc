@@ -57,3 +57,64 @@
     @apply bg-background text-foreground;
   }
 }
+
+/*
+ * Print-friendly view used by the order detail page (and any other
+ * receipt-style surface that opts in by adding `data-print-area`).
+ *
+ * Everything outside the `data-print-area` block is hidden so the
+ * printed page becomes just the receipt body — no site header, no
+ * sidebar nav, no action buttons. Inside the receipt we strip
+ * background colours and shadows for ink-friendly output, then force
+ * black text on white so badge / muted styles still read on paper.
+ *
+ * Elements explicitly marked `data-no-print` are hidden too — useful
+ * for the "Print" button itself, which would otherwise sit awkwardly
+ * on the printed page.
+ */
+@media print {
+  body {
+    background: white !important;
+    color: black !important;
+  }
+
+  /* Hide every direct page chrome ancestor; the print area is shown
+     by overriding the rule below. */
+  body * {
+    visibility: hidden;
+  }
+
+  [data-print-area],
+  [data-print-area] * {
+    visibility: visible;
+  }
+
+  [data-print-area] {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    margin: 0;
+    padding: 0;
+    background: white !important;
+    color: black !important;
+  }
+
+  [data-no-print],
+  [data-no-print] * {
+    display: none !important;
+  }
+
+  /* Strip card chrome that doesn't render well on paper. */
+  [data-print-area] .shadow,
+  [data-print-area] .shadow-sm,
+  [data-print-area] .shadow-md,
+  [data-print-area] .shadow-lg,
+  [data-print-area] [class*="shadow-"] {
+    box-shadow: none !important;
+  }
+
+  [data-print-area] a {
+    color: inherit !important;
+    text-decoration: none !important;
+  }
+}
