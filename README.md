@@ -151,9 +151,35 @@ zod, sonner toasts.
   `/api/auth/logout` and refreshes so the header re-renders.
 - `lib/client/auth-schema.ts` — zod schemas (register + login)
   mirroring the server's rules, plus the password-strength heuristic.
+- `lib/client/profile-schema.ts` — zod schema for the /account
+  profile form (name + email).
+- `lib/client/address-schema.ts` — zod schema and form/payload helpers
+  for the /account/addresses CRUD form.
 - `lib/client/utils.ts` — `cn()` (clsx + tailwind-merge).
 - `components/ui/*` — shadcn/ui primitives (button, input, label,
   card, form, sonner toaster).
+- `app/(site)/account/layout.tsx` — `/account/*` shell. Server
+  component, defence-in-depth `getCurrentUser()` check that mirrors
+  the middleware redirect, plus a sidebar nav for Profile / Addresses /
+  Order history.
+- `app/(site)/account/page.tsx` — profile editor card + a prominent
+  "View order history" link.
+- `app/(site)/account/addresses/page.tsx` — addresses CRUD page;
+  fetches the initial list server-side via `listAddressesForUser`.
+- `app/(site)/account/orders/page.tsx` — placeholder shell for the
+  order history view (real list lands in a later task).
+- `components/account/profile-form.tsx` — client form wired to
+  `PUT /api/users/me`. Sparse PUTs (only changed fields), inline
+  email-collision (409) handling, success toast + `router.refresh()`
+  so the site header picks up the new identity.
+- `components/account/addresses-manager.tsx` — owns the address list
+  state and the create/update/delete/set-default flows. Refetches
+  after each mutation so the partial-unique-default invariant on the
+  server stays the source of truth.
+- `components/account/address-form.tsx` — shared create/edit form,
+  consumed by the manager for both modes.
+- `components/account/account-nav.tsx` — sidebar nav with active-link
+  highlighting via `usePathname()`.
 
 ### Cross-tab session state
 
