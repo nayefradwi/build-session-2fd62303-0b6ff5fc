@@ -1,6 +1,22 @@
 /**
  * Orders collection routes.
  *
+ *   GET /api/orders
+ *     Returns the authenticated user's order history, newest first. The
+ *     query is ownership-scoped at the SQL layer — callers can NEVER
+ *     read another user's orders even with a crafted query string.
+ *
+ *     Query parameters (all optional):
+ *       - page                  1-indexed page number (default 1)
+ *       - pageSize              items per page (default 20, max 100)
+ *       - status                "all" (default) | one of ORDER_STATUSES
+ *       - previewItemLimit      number of preview line items per row,
+ *                               clamped to 0..10 (default 3)
+ *
+ *     Response: `{ items: PublicOrderListEntry[], page, pageSize, total,
+ *                  totalPages, hasMore }`. List entries omit the full
+ *     `items[]` array — fetch the detail endpoint to read every line.
+ *
  *   POST /api/orders
  *     Body:
  *       {
@@ -48,7 +64,12 @@ import { z } from "zod";
 
 import { AuthRequiredError, requireUser } from "@/lib/server/auth";
 import {
+  ORDERS_DEFAULT_PAGE_SIZE,
+  ORDERS_MAX_PAGE_SIZE,
+  ORDER_LIST_STATUS_FILTERS,
   createOrderFromCart,
+  listOrdersForUser,
+  parseOrderStatusFilter,
   type CreateOrderError,
 } from "@/lib/server/orders";
 import { sendOrderConfirmationEmail } from "@/lib/server/order-emails";
@@ -187,6 +208,117 @@ function mutationErrorResponse(
         error: err.message || "Failed to create order",
         code: "internal_error",
       });
+  }
+}
+
+/**
+ * Parse a non-negative integer query-string knob, returning a typed
+ * error on garbage input. `null`/empty string is treated as "unset".
+ */
+function parseInteger(
+  raw: string | null,
+  field: string,
+  min: number,
+  max: number,
+):
+  | { ok: true; value: number | undefined }
+  | { ok: false; error: ErrorBody } {
+  if (raw === null || raw === "") return { ok: true, value: undefined };
+  if (!/^-?\d+$/.test(raw)) {
+    return {
+      ok: false,
+      error: {
+        error: `\`${field}\` must be an integer`,
+        code: "validation_failed",
+        fieldErrors: { [field]: ["Expected an integer"] },
+      },
+    };
+  }
+  const parsed = parseInt(raw, 10);
+  if (parsed < min || parsed > max) {
+    return {
+      ok: false,
+      error: {
+        error: `\`${field}\` must be between ${min} and ${max}`,
+        code: "validation_failed",
+        fieldErrors: { [field]: [`Out of range (${min}-${max})`] },
+      },
+    };
+  }
+  return { ok: true, value: parsed };
+}
+
+/**
+ * GET /api/orders
+ *
+ * Returns the authenticated user's order history. Ownership is enforced
+ * at the SQL layer in `listOrdersForUser` — there is no way to read
+ * another user's orders through this endpoint.
+ */
+export async function GET(req: Request) {
+  let user;
+  try {
+    user = await requireUser();
+  } catch (err) {
+    if (err instanceof AuthRequiredError) return unauthorized();
+    throw err;
+  }
+
+  const url = new URL(req.url);
+
+  // status filter
+  const statusRaw = url.searchParams.get("status");
+  const statusFilter = parseOrderStatusFilter(statusRaw);
+  if (statusFilter === null) {
+    return errorResponse(400, {
+      error: `\`status\` must be one of: ${ORDER_LIST_STATUS_FILTERS.join(", ")}`,
+      code: "validation_failed",
+      fieldErrors: { status: ["Invalid status"] },
+    });
+  }
+
+  // page
+  const pageParsed = parseInteger(
+    url.searchParams.get("page"),
+    "page",
+    1,
+    1_000_000,
+  );
+  if (!pageParsed.ok) return errorResponse(400, pageParsed.error);
+
+  // pageSize
+  const pageSizeParsed = parseInteger(
+    url.searchParams.get("pageSize"),
+    "pageSize",
+    1,
+    ORDERS_MAX_PAGE_SIZE,
+  );
+  if (!pageSizeParsed.ok) return errorResponse(400, pageSizeParsed.error);
+
+  // previewItemLimit
+  const previewParsed = parseInteger(
+    url.searchParams.get("previewItemLimit"),
+    "previewItemLimit",
+    0,
+    10,
+  );
+  if (!previewParsed.ok) return errorResponse(400, previewParsed.error);
+
+  try {
+    const result = await listOrdersForUser({
+      userId: user.id,
+      page: pageParsed.value ?? 1,
+      pageSize: pageSizeParsed.value ?? ORDERS_DEFAULT_PAGE_SIZE,
+      status: statusFilter,
+      previewItemLimit: previewParsed.value,
+    });
+    return NextResponse.json(result, { status: 200 });
+  } catch (err) {
+    console.error("[GET /api/orders] failed", err);
+    return errorResponse(500, {
+      error: "Failed to load orders",
+      code: "internal_error",
+    });
   }
 }
 

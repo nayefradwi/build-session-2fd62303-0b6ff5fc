@@ -28,10 +28,11 @@
  */
 import { randomUUID } from "node:crypto";
 
-import { and, eq, inArray } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
 
 import { db, neonSql } from "@/lib/db";
 import {
+  ORDER_STATUSES,
   addresses,
   discountCodes,
   orderItems,
@@ -41,6 +42,7 @@ import {
   type Address,
   type Order,
   type OrderItem,
+  type OrderStatus,
   type Product,
 } from "@/lib/db/schema";
 import {
@@ -745,4 +747,250 @@ export async function createOrderFromCart(
     .where(eq(orderItems.orderId, orderId));
 
   return { ok: true, data: toPublicSummary(orderRow, itemRowsBack) };
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Read-side helpers: user order list & detail                               */
+/* -------------------------------------------------------------------------- */
+
+/** Default + max page sizes for `GET /api/orders`. */
+export const ORDERS_DEFAULT_PAGE_SIZE = 20;
+export const ORDERS_MAX_PAGE_SIZE = 100;
+
+/**
+ * Listing entry — a compact projection of `PublicOrderSummary` that the
+ * order-history page renders in a table. The full line items live behind
+ * the detail endpoint so the list payload stays small even when a user
+ * has hundreds of orders.
+ *
+ * We keep the rolled-up totals + a small `previewItems` slice so the UI
+ * can render thumbnails ("3 items") without a second round-trip per row.
+ */
+export interface PublicOrderListItemPreview {
+  /** Snapshotted product name. */
+  name: string;
+  /** Thumbnail captured at order time (may be null). */
+  imageUrl: string | null;
+  quantity: number;
+}
+
+export interface PublicOrderListEntry {
+  id: string;
+  status: string;
+  itemCount: number;
+  /** Sum of `quantity` across every line — same as `itemCount`. */
+  totalQuantity: number;
+  subtotalCents: number;
+  shippingCents: number;
+  discountCents: number;
+  totalCents: number;
+  currency: string;
+  discountCode: string | null;
+  shippingCity: string;
+  shippingCountry: string;
+  /**
+   * Up to `previewItemLimit` snapshotted lines, ordered by insertion
+   * (i.e. their `createdAt`). Useful for rendering a tiny avatar stack
+   * next to each row in the order history table.
+   */
+  previewItems: PublicOrderListItemPreview[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ListOrdersForUserInput {
+  userId: string;
+  page?: number;
+  pageSize?: number;
+  /** Optional status filter; "all" (default) returns every order. */
+  status?: OrderStatus | "all";
+  /** How many `previewItems` to include per row. Defaults to 3. */
+  previewItemLimit?: number;
+}
+
+export interface ListOrdersForUserResult {
+  items: PublicOrderListEntry[];
+  page: number;
+  pageSize: number;
+  total: number;
+  totalPages: number;
+  hasMore: boolean;
+}
+
+function isOrderStatus(value: string): value is OrderStatus {
+  return (ORDER_STATUSES as readonly string[]).includes(value);
+}
+
+/**
+ * Map a raw `orders` row + (optional) preview items to the list-view
+ * payload. The `previewItems` are kept as a small, stable subset of the
+ * snapshotted line items.
+ */
+function toPublicListEntry(
+  order: Order,
+  previewItems: OrderItem[],
+): PublicOrderListEntry {
+  return {
+    id: order.id,
+    status: order.status,
+    itemCount: order.itemCount,
+    totalQuantity: order.itemCount,
+    subtotalCents: order.subtotalCents,
+    shippingCents: order.shippingCents,
+    discountCents: order.discountCents,
+    totalCents: order.totalCents,
+    currency: order.currency,
+    discountCode: order.discountCode ?? null,
+    shippingCity: order.shippingCity,
+    shippingCountry: order.shippingCountry,
+    previewItems: previewItems.map((it) => ({
+      name: it.name,
+      imageUrl: it.imageUrl ?? null,
+      quantity: it.quantity,
+    })),
+    createdAt: order.createdAt.toISOString(),
+    updatedAt: order.updatedAt.toISOString(),
+  };
+}
+
+/**
+ * Paginated listing of every order belonging to `userId`, ordered newest
+ * first. The query is ownership-scoped at the SQL layer (`user_id = $1`)
+ * so a malicious caller cannot ask for someone else's history even with
+ * a crafted query string.
+ */
+export async function listOrdersForUser(
+  input: ListOrdersForUserInput,
+): Promise<ListOrdersForUserResult> {
+  const page = Math.max(1, Math.floor(input.page ?? 1));
+  const pageSize = Math.max(
+    1,
+    Math.min(
+      ORDERS_MAX_PAGE_SIZE,
+      Math.floor(input.pageSize ?? ORDERS_DEFAULT_PAGE_SIZE),
+    ),
+  );
+  const previewItemLimit = Math.max(
+    0,
+    Math.min(10, Math.floor(input.previewItemLimit ?? 3)),
+  );
+  const status = input.status ?? "all";
+
+  const whereParts = [eq(orders.userId, input.userId)];
+  if (status !== "all") {
+    whereParts.push(eq(orders.status, status));
+  }
+  const whereClause = and(...whereParts);
+
+  // Total count (after filters) for pagination metadata.
+  const totalRows = await db
+    .select({ count: sql<number>`count(*)::int` })
+    .from(orders)
+    .where(whereClause);
+  const total = totalRows[0]?.count ?? 0;
+
+  if (total === 0) {
+    return {
+      items: [],
+      page,
+      pageSize,
+      total: 0,
+      totalPages: 0,
+      hasMore: false,
+    };
+  }
+
+  // Fetch the page.
+  const rows = await db
+    .select()
+    .from(orders)
+    .where(whereClause)
+    .orderBy(desc(orders.createdAt), desc(orders.id))
+    .limit(pageSize)
+    .offset((page - 1) * pageSize);
+
+  // Bulk-load preview items for every order on the page in a single
+  // round-trip, then trim to `previewItemLimit` per order in memory.
+  // This is cheap because the query is bounded by `pageSize` orders and
+  // every order has at most a handful of lines.
+  let previewByOrder = new Map<string, OrderItem[]>();
+  if (previewItemLimit > 0 && rows.length > 0) {
+    const orderIds = rows.map((r) => r.id);
+    const itemRows = await db
+      .select()
+      .from(orderItems)
+      .where(inArray(orderItems.orderId, orderIds))
+      .orderBy(asc(orderItems.createdAt), asc(orderItems.id));
+    previewByOrder = new Map();
+    for (const it of itemRows) {
+      const list = previewByOrder.get(it.orderId);
+      if (list) {
+        if (list.length < previewItemLimit) list.push(it);
+      } else {
+        previewByOrder.set(it.orderId, [it]);
+      }
+    }
+  }
+
+  const items = rows.map((row) =>
+    toPublicListEntry(row, previewByOrder.get(row.id) ?? []),
+  );
+  const totalPages = Math.ceil(total / pageSize);
+
+  return {
+    items,
+    page,
+    pageSize,
+    total,
+    totalPages,
+    hasMore: page * pageSize < total,
+  };
+}
+
+/**
+ * Look up a single order by id, but only when it belongs to `userId`.
+ * Returns the full `PublicOrderSummary` (header + line items) on a hit,
+ * or `null` on miss. The ownership check is part of the SQL `WHERE`
+ * clause so an attacker who guesses a UUID still gets a 404.
+ */
+export async function getOrderForUser(
+  userId: string,
+  orderId: string,
+): Promise<PublicOrderSummary | null> {
+  const orderRows = await db
+    .select()
+    .from(orders)
+    .where(and(eq(orders.id, orderId), eq(orders.userId, userId)))
+    .limit(1);
+  const orderRow = orderRows[0];
+  if (!orderRow) return null;
+
+  const itemRows = await db
+    .select()
+    .from(orderItems)
+    .where(eq(orderItems.orderId, orderRow.id))
+    .orderBy(asc(orderItems.createdAt), asc(orderItems.id));
+
+  return toPublicSummary(orderRow, itemRows);
+}
+
+/**
+ * Set of statuses the API surface accepts as a `status=` filter on the
+ * list endpoint. The route layer uses this to validate the query string
+ * before calling `listOrdersForUser`.
+ */
+export const ORDER_LIST_STATUS_FILTERS = [
+  "all",
+  ...ORDER_STATUSES,
+] as const;
+export type OrderListStatusFilter =
+  (typeof ORDER_LIST_STATUS_FILTERS)[number];
+
+export function parseOrderStatusFilter(
+  raw: string | null,
+): OrderListStatusFilter | null {
+  if (raw === null || raw === "") return "all";
+  if (raw === "all") return "all";
+  if (isOrderStatus(raw)) return raw;
+  return null;
 }
