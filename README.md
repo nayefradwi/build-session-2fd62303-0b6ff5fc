@@ -115,6 +115,41 @@ so the index is never violated.
   authenticated user with the supplied product id. 200 on success, 404
   if no such entry exists, 401 if unauthenticated.
 
+#### Cart
+
+- `GET /api/cart` — list every cart line for the authenticated user,
+  newest-updated-first. The response is `{ items, summary }`. Each line
+  includes `quantity`, snapshot `unitPriceCents` / `lineTotalCents`,
+  `currency`, and an embedded product summary (name, slug, primary
+  image, live `stock`, `inStock`, coarse `stockStatus`). The `summary`
+  block carries `itemCount`, `subtotalCents`, `shippingCents` (placeholder
+  — always 0 until the checkout/shipping task wires it in),
+  `discountCents` (placeholder — always 0 until the promo task wires it
+  in), `totalCents`, and `currency`.
+- `POST /api/cart` — `{ productId, quantity?, mode? }`. Adds a product
+  to the authenticated user's cart. `quantity` defaults to 1 (max 99
+  per line). `mode` defaults to `"increment"` (a repeat call piles up
+  units onto the existing line); pass `"set"` to overwrite the line
+  with the supplied quantity. The route enforces stock — out-of-stock
+  products are rejected up front with 409 `out_of_stock`, and any
+  quantity above `products.stock` returns 409 `exceeds_stock` with the
+  available count in `details`. 201 on insert, 200 on update of an
+  existing line, 404 for an unknown product id, 400 for a malformed
+  payload, 401 if unauthenticated.
+- `PUT /api/cart/{itemId}` — `{ quantity }`. Sets the absolute quantity
+  on an existing cart line (no increment semantics). Same stock and
+  per-line caps as POST. 200 on success, 404 if the item doesn't belong
+  to the authenticated user, 409 on stock conflict.
+- `DELETE /api/cart/{itemId}` — remove the cart line owned by the
+  authenticated user. 200 `{ ok: true, summary }` on success (with the
+  refreshed cart summary), 404 if no such item exists, 401 if
+  unauthenticated.
+
+The cart enforces uniqueness of `(user_id, product_id)` via the same
+partial-unique-index pattern as the wishlist. If a concurrent insert
+would otherwise collide, the helper falls back to updating the row that
+won the race using the original mode (increment vs set).
+
 ### Email
 
 `lib/server/email.ts` wraps Resend's REST API via `fetch`. When

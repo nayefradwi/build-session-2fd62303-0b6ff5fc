@@ -378,3 +378,57 @@ export type ProductImage = typeof productImages.$inferSelect;
 export type NewProductImage = typeof productImages.$inferInsert;
 export type WishlistItem = typeof wishlistItems.$inferSelect;
 export type NewWishlistItem = typeof wishlistItems.$inferInsert;
+
+/**
+ * Cart items.
+ *
+ * One row per (user, product) pair, holding the quantity the shopper has
+ * chosen. Like the wishlist, the natural key `(user_id, product_id)` is
+ * enforced with a unique index so the same product never appears as two
+ * separate rows in a single user's cart — repeat "add to cart" calls
+ * increment the existing row instead.
+ *
+ * - `quantity` is required and is checked to be > 0 by the application
+ *   layer; the route also rejects any value greater than the live
+ *   `products.stock` so a shopper cannot reserve more than is on hand.
+ * - Both foreign keys cascade on delete: deleting a user (or product)
+ *   tears the corresponding cart rows down so we never leave dangling
+ *   references.
+ *
+ * The `quantity` column does NOT carry a database CHECK constraint —
+ * Drizzle's stable surface for column-level CHECKs is still in flux at
+ * the time of writing — but the migration and the route handlers both
+ * enforce the > 0 invariant. Adding a CHECK in a follow-up migration is
+ * a clean future-only edit.
+ */
+export const cartItems = pgTable(
+  "cart_items",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    productId: uuid("product_id")
+      .notNull()
+      .references(() => products.id, { onDelete: "cascade" }),
+    quantity: integer("quantity").notNull().default(1),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => ({
+    userIdx: index("cart_items_user_idx").on(table.userId),
+    productIdx: index("cart_items_product_idx").on(table.productId),
+    // Prevent duplicates: a user has at most one row per product.
+    userProductIdx: uniqueIndex("cart_items_user_product_idx").on(
+      table.userId,
+      table.productId,
+    ),
+  }),
+);
+
+export type CartItem = typeof cartItems.$inferSelect;
+export type NewCartItem = typeof cartItems.$inferInsert;
