@@ -7,6 +7,9 @@ import {
   index,
   boolean,
   uniqueIndex,
+  integer,
+  numeric,
+  type AnyPgColumn,
 } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 
@@ -180,6 +183,142 @@ export const addresses = pgTable(
   }),
 );
 
+/**
+ * Product taxonomy.
+ *
+ * Categories are slug-keyed (e.g. "outerwear", "footwear/sneakers") so
+ * they can be referenced from URLs without exposing internal UUIDs.
+ *
+ * `parentId` is a self-reference enabling a one-level (or deeper) tree.
+ * It is nullable: top-level categories have a NULL parent. The default
+ * `onDelete` for the parent reference is set-null so removing a parent
+ * promotes its children to the top level rather than cascading deletes.
+ */
+export const categories = pgTable(
+  "categories",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    slug: varchar("slug", { length: 120 }).notNull().unique(),
+    name: varchar("name", { length: 200 }).notNull(),
+    description: text("description"),
+    parentId: uuid("parent_id").references((): AnyPgColumn => categories.id, {
+      onDelete: "set null",
+    }),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => ({
+    slugIdx: index("categories_slug_idx").on(table.slug),
+    parentIdx: index("categories_parent_idx").on(table.parentId),
+  }),
+);
+
+/**
+ * Products / SKUs.
+ *
+ * One product row corresponds to a single sellable SKU. Fields cover the
+ * common e-commerce browse/search/filter surface:
+ *
+ * - `slug` is the URL identifier; `sku` is the merchant-facing code.
+ * - Price is stored in integer cents (no rounding surprises). Optional
+ *   `compareAtPriceCents` is the original/strike-through price for sales.
+ * - Variant axes (`size`, `material`, `color`) are flat strings; richer
+ *   variant modeling can be added later behind the same API.
+ * - `stock` is the on-hand quantity. The `availability` filter on the
+ *   browse API maps to `stock > 0` / `stock = 0`.
+ * - `isFeatured` / `isNew` are merchandising flags surfaced in the UI.
+ * - `ratingAverage` / `ratingCount` are denormalised aggregates kept in
+ *   sync by review write-paths (out of scope for this task).
+ * - `salesCount` powers the popularity sort.
+ *
+ * The `search_vector` column (added in the SQL migration) is a STORED
+ * generated tsvector built from `name` + `description` with weighted
+ * lexemes. It is queried with `plainto_tsquery` and indexed with GIN.
+ * It is intentionally NOT declared on this Drizzle table: it cannot be
+ * inserted into or updated, and queries reference it via raw SQL.
+ */
+export const products = pgTable(
+  "products",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    slug: varchar("slug", { length: 200 }).notNull().unique(),
+    sku: varchar("sku", { length: 64 }).notNull().unique(),
+    name: varchar("name", { length: 300 }).notNull(),
+    description: text("description").notNull().default(""),
+    categoryId: uuid("category_id").references(() => categories.id, {
+      onDelete: "set null",
+    }),
+    priceCents: integer("price_cents").notNull(),
+    compareAtPriceCents: integer("compare_at_price_cents"),
+    currency: varchar("currency", { length: 3 }).notNull().default("USD"),
+    size: varchar("size", { length: 32 }),
+    material: varchar("material", { length: 64 }),
+    color: varchar("color", { length: 32 }),
+    stock: integer("stock").notNull().default(0),
+    isFeatured: boolean("is_featured").notNull().default(false),
+    isNew: boolean("is_new").notNull().default(false),
+    ratingAverage: numeric("rating_average", { precision: 3, scale: 2 })
+      .notNull()
+      .default("0"),
+    ratingCount: integer("rating_count").notNull().default(0),
+    salesCount: integer("sales_count").notNull().default(0),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => ({
+    slugIdx: index("products_slug_idx").on(table.slug),
+    skuIdx: index("products_sku_idx").on(table.sku),
+    categoryIdx: index("products_category_idx").on(table.categoryId),
+    priceIdx: index("products_price_idx").on(table.priceCents),
+    createdAtIdx: index("products_created_at_idx").on(table.createdAt),
+    ratingIdx: index("products_rating_idx").on(table.ratingAverage),
+    salesIdx: index("products_sales_idx").on(table.salesCount),
+    sizeIdx: index("products_size_idx").on(table.size),
+    materialIdx: index("products_material_idx").on(table.material),
+    colorIdx: index("products_color_idx").on(table.color),
+    stockIdx: index("products_stock_idx").on(table.stock),
+    featuredIdx: index("products_featured_idx").on(table.isFeatured),
+  }),
+);
+
+/**
+ * Image gallery for a product.
+ *
+ * The first row (lowest `position`) is the primary thumbnail; subsequent
+ * rows feed the PDP carousel. `url` is treated as opaque — it can point
+ * at the public-asset CDN, an S3 bucket, or a placeholder service.
+ */
+export const productImages = pgTable(
+  "product_images",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    productId: uuid("product_id")
+      .notNull()
+      .references(() => products.id, { onDelete: "cascade" }),
+    url: text("url").notNull(),
+    alt: varchar("alt", { length: 300 }),
+    position: integer("position").notNull().default(0),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => ({
+    productIdx: index("product_images_product_idx").on(table.productId),
+    productPositionIdx: index("product_images_product_position_idx").on(
+      table.productId,
+      table.position,
+    ),
+  }),
+);
+
 export type User = typeof users.$inferSelect;
 export type NewUser = typeof users.$inferInsert;
 export type Session = typeof sessions.$inferSelect;
@@ -190,3 +329,9 @@ export type PasswordResetToken = typeof passwordResetTokens.$inferSelect;
 export type NewPasswordResetToken = typeof passwordResetTokens.$inferInsert;
 export type Address = typeof addresses.$inferSelect;
 export type NewAddress = typeof addresses.$inferInsert;
+export type Category = typeof categories.$inferSelect;
+export type NewCategory = typeof categories.$inferInsert;
+export type Product = typeof products.$inferSelect;
+export type NewProduct = typeof products.$inferInsert;
+export type ProductImage = typeof productImages.$inferSelect;
+export type NewProductImage = typeof productImages.$inferInsert;
