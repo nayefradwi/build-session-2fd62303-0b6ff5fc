@@ -58,19 +58,29 @@ export default async function LoginPage({ searchParams }: LoginPageProps) {
         </CardHeader>
         <CardContent className="space-y-6">
           <LoginForm redirectTo={redirectTo} />
-          <p className="text-center text-sm text-muted-foreground">
-            Don&apos;t have an account?{" "}
-            <Link
-              href={`/register${
-                redirectTo && redirectTo !== "/"
-                  ? `?redirect=${encodeURIComponent(redirectTo)}`
-                  : ""
-              }`}
-              className="font-medium text-primary underline-offset-4 hover:underline"
-            >
-              Create one
-            </Link>
-          </p>
+          <div className="space-y-2 text-center text-sm text-muted-foreground">
+            <p>
+              <Link
+                href="/forgot-password"
+                className="font-medium text-primary underline-offset-4 hover:underline"
+              >
+                Forgot your password?
+              </Link>
+            </p>
+            <p>
+              Don&apos;t have an account?{" "}
+              <Link
+                href={`/register${
+                  redirectTo && redirectTo !== "/"
+                    ? `?redirect=${encodeURIComponent(redirectTo)}`
+                    : ""
+                }`}
+                className="font-medium text-primary underline-offset-4 hover:underline"
+              >
+                Create one
+              </Link>
+            </p>
+          </div>
         </CardContent>
       </Card>
     </main>

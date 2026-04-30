@@ -52,6 +52,44 @@ export const loginFormSchema = z.object({
 
 export type LoginFormValues = z.infer<typeof loginFormSchema>;
 
+/** Zod schema for the "forgot password" request form. */
+export const forgotPasswordFormSchema = z.object({
+  email: z
+    .string()
+    .trim()
+    .min(1, "Email is required")
+    .email("Enter a valid email address"),
+});
+
+export type ForgotPasswordFormValues = z.infer<
+  typeof forgotPasswordFormSchema
+>;
+
+/**
+ * Zod schema for the "reset password" confirm form.
+ *
+ * Mirrors the registration password rules — they're applied to a *new*
+ * password, so the same minimum strength makes sense. The confirm field
+ * has to match the password field exactly, otherwise we'd risk
+ * locking the user out of the account they're trying to recover.
+ */
+export const resetPasswordFormSchema = z
+  .object({
+    password: z
+      .string()
+      .min(PASSWORD_MIN_LENGTH, `At least ${PASSWORD_MIN_LENGTH} characters`)
+      .max(PASSWORD_MAX_LENGTH, `At most ${PASSWORD_MAX_LENGTH} characters`)
+      .regex(/[A-Za-z]/, "Must contain at least one letter")
+      .regex(/[0-9]/, "Must contain at least one number"),
+    confirmPassword: z.string().min(1, "Please confirm your password"),
+  })
+  .refine((data) => data.password === data.confirmPassword, {
+    path: ["confirmPassword"],
+    message: "Passwords do not match",
+  });
+
+export type ResetPasswordFormValues = z.infer<typeof resetPasswordFormSchema>;
+
 /**
  * Computed password strength on a 0–4 scale plus a label.
  *
