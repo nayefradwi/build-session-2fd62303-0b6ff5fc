@@ -38,6 +38,15 @@ export const env = {
    * on your Resend account in production.
    */
   EMAIL_FROM: process.env.EMAIL_FROM ?? "no-reply@example.com",
+  /**
+   * Vercel Blob read-write token used by the admin product image-upload
+   * route. When unset, uploads in production return a 503 ("not
+   * configured") and uploads in development fall back to deterministic
+   * placeholder URLs so the create/edit flows remain exercisable without
+   * provisioning a blob store first. Generate one at:
+   *   Vercel project → Storage → Blob → Connect → Read/Write token.
+   */
+  BLOB_READ_WRITE_TOKEN: process.env.BLOB_READ_WRITE_TOKEN ?? "",
 } as const;
 
 export type Env = typeof env;

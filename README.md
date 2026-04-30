@@ -245,6 +245,70 @@ increments `usageCount` is intentionally out of scope for this task —
 the column exists today so checkout can `UPDATE … SET usage_count =
 usage_count + 1` atomically when wired up later.
 
+### Products & categories (admin)
+
+Catalog writes live behind the admin role. The helpers in
+`lib/server/admin-products.ts` and `lib/server/admin-categories.ts`
+centralise validation, normalisation (slug / sku), unique-pre-checks,
+and parent-cycle detection so the route handlers stay thin. Every write
+bumps `products.updatedAt` (or `categories.updatedAt`) so the public
+GET endpoints — which read straight from the same tables — surface the
+change on the next request.
+
+- `GET    /api/admin/products` — paginated catalog list. Query params:
+  `q` (matches name/sku/slug, ILIKE), `featured=true`, `new=true`,
+  `categoryId`, `page`, `pageSize` (default 25, max 100). Each item
+  carries the full image gallery.
+- `POST   /api/admin/products` — body `{ slug, sku, name, priceCents, … }`
+  with optional `images: [{ url, alt?, position? }, …]`. Creates the
+  product row and (atomically-ish, with manual rollback on the HTTP
+  driver) the gallery rows. Returns 201, or 409 on slug/sku conflict.
+- `GET    /api/admin/products/{id}` — fetch by UUID or slug, full
+  payload incl. image gallery.
+- `PUT    /api/admin/products/{id}` — partial update. Supplying
+  `images: [...]` replaces the gallery wholesale (orphaned blobs are
+  best-effort cleaned up); omit `images` to leave it intact.
+- `DELETE /api/admin/products/{id}` — hard delete. `product_images`,
+  `wishlist_items`, `cart_items`, and `reviews` cascade. Order line
+  items keep their snapshot so historical orders survive.
+- `POST   /api/admin/products/{id}/images` — append `{ images: [...] }`
+  to an existing gallery. Positions auto-increment after the current
+  max.
+- `PUT    /api/admin/products/{id}/images` — reorder via
+  `{ order: [{ id, position }, …] }`.
+- `DELETE /api/admin/products/{id}/images/{imageId}` — remove a single
+  gallery row and best-effort delete the underlying blob.
+- `GET    /api/admin/categories` — list with derived `productCount`.
+  Optional `q` and `topLevelOnly=true`.
+- `POST   /api/admin/categories` — create (`{ slug, name, description?,
+  parentId? }`). 409 on slug conflict; 400 if `parentId` is unknown.
+- `GET    /api/admin/categories/{id}` — fetch by id or slug.
+- `PUT    /api/admin/categories/{id}` — partial update. A `parent_cycle`
+  400 fires if the new parent is `id` itself or one of its
+  descendants.
+- `DELETE /api/admin/categories/{id}` — refuses (`409 in_use`) when
+  products still reference the category; pass `?force=true` to detach
+  them via the `ON DELETE SET NULL` FK.
+
+#### Image upload
+
+Image binaries are persisted to **Vercel Blob** via
+`lib/server/blob.ts`, which also enforces the size cap (10 MiB) and the
+MIME allow-list (jpeg / png / webp / gif / avif). Pathnames embed a
+SHA-256 prefix of the bytes so re-uploads of the same file are stable.
+
+- `POST /api/admin/uploads` — accepts `multipart/form-data` with a
+  `file` field, or a raw image body. Returns
+  `{ url, contentType, size, pathname }`. The admin UI POSTs the
+  resulting `url` into a product's `images` array.
+- `GET  /api/admin/uploads` — reports `{ maxBytes, allowedContentTypes }`
+  so a client form can validate locally before submitting.
+
+When `BLOB_READ_WRITE_TOKEN` is unset the route returns a typed `503
+not_configured` in production; in dev it falls back to deterministic
+placeholder URLs under `${APP_URL}/uploads/...` so the create/edit
+flows remain exercisable without provisioning a blob store first.
+
 ### Email
 
 `lib/server/email.ts` wraps Resend's REST API via `fetch`. When

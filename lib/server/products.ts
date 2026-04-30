@@ -293,7 +293,7 @@ async function fetchPrimaryImages(
   return out;
 }
 
-function toPublicProduct(
+export function toPublicProduct(
   row: ProductRow,
   primaryImageUrl: string | null,
 ): PublicProduct {
