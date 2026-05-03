@@ -7,12 +7,9 @@
  * the user's cart — all of which must happen atomically. A partial
  * commit would leak items, double-charge stock, or worse.
  *
- * The Neon HTTP driver does not expose interactive transactions (the
- * drizzle wrapper throws), but the underlying `neon()` SQL tag exposes a
- * non-interactive batched transaction with first-class isolation level
- * support. We pre-compute every value the transaction needs (cart load,
- * address resolve, discount re-validation, price/total recomputation)
- * and then submit the writes as a single SERIALIZABLE batch.
+ * We pre-compute every value the transaction needs (cart load, address
+ * resolve, discount re-validation, price/total recomputation) and then
+ * submit the writes as a single SERIALIZABLE Drizzle transaction.
  *
  * Race-free inventory enforcement is achieved by:
  *   1. A `CHECK ("stock" >= 0)` constraint on `products` (added in
@@ -30,7 +27,7 @@ import { randomUUID } from "node:crypto";
 
 import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
 
-import { db, neonSql } from "@/lib/db";
+import { db } from "@/lib/db";
 import {
   ORDER_STATUSES,
   addresses,
@@ -586,82 +583,70 @@ export async function createOrderFromCart(
   //    runs inside the same Postgres transaction; a CHECK violation on
   //    any line rolls the whole thing back.
   try {
-    await neonSql.transaction(
-      (tx) => {
-        const queries = [];
-
+    await db.transaction(
+      async (tx) => {
         // Insert the order header.
-        queries.push(
-          tx`INSERT INTO orders (
-            id, user_id, status,
-            shipping_address_id, shipping_recipient, shipping_phone,
-            shipping_line1, shipping_line2, shipping_city, shipping_state,
-            shipping_postal_code, shipping_country,
-            subtotal_cents, shipping_cents, discount_cents, total_cents, currency,
-            discount_code_id, discount_code,
-            item_count, notes,
-            created_at, updated_at
-          ) VALUES (
-            ${orderId}, ${input.userId}, ${"pending"},
-            ${a.id}, ${a.recipient}, ${a.phone},
-            ${a.line1}, ${a.line2}, ${a.city}, ${a.state},
-            ${a.postalCode}, ${a.country},
-            ${data.subtotalCents}, ${data.shippingCents}, ${data.discountCents}, ${data.totalCents}, ${data.currency},
-            ${data.discount ? data.discount.id : null}, ${data.discount ? data.discount.code : null},
-            ${data.itemCount}, ${input.notes ?? null},
-            NOW(), NOW()
-          )`,
-        );
+        await tx.execute(sql`INSERT INTO orders (
+          id, user_id, status,
+          shipping_address_id, shipping_recipient, shipping_phone,
+          shipping_line1, shipping_line2, shipping_city, shipping_state,
+          shipping_postal_code, shipping_country,
+          subtotal_cents, shipping_cents, discount_cents, total_cents, currency,
+          discount_code_id, discount_code,
+          item_count, notes,
+          created_at, updated_at
+        ) VALUES (
+          ${orderId}, ${input.userId}, ${"pending"},
+          ${a.id}, ${a.recipient}, ${a.phone},
+          ${a.line1}, ${a.line2}, ${a.city}, ${a.state},
+          ${a.postalCode}, ${a.country},
+          ${data.subtotalCents}, ${data.shippingCents}, ${data.discountCents}, ${data.totalCents}, ${data.currency},
+          ${data.discount ? data.discount.id : null}, ${data.discount ? data.discount.code : null},
+          ${data.itemCount}, ${input.notes ?? null},
+          NOW(), NOW()
+        )`);
 
         // Insert each line item.
         for (const it of itemRows) {
-          queries.push(
-            tx`INSERT INTO order_items (
-              id, order_id, product_id, sku, name, size, material, color,
-              image_url, quantity, unit_price_cents, line_total_cents, currency,
-              created_at
-            ) VALUES (
-              ${it.id}, ${orderId}, ${it.productId}, ${it.sku}, ${it.name},
-              ${it.size}, ${it.material}, ${it.color}, ${it.imageUrl},
-              ${it.quantity}, ${it.unitPriceCents}, ${it.lineTotalCents}, ${it.currency},
-              NOW()
-            )`,
-          );
+          await tx.execute(sql`INSERT INTO order_items (
+            id, order_id, product_id, sku, name, size, material, color,
+            image_url, quantity, unit_price_cents, line_total_cents, currency,
+            created_at
+          ) VALUES (
+            ${it.id}, ${orderId}, ${it.productId}, ${it.sku}, ${it.name},
+            ${it.size}, ${it.material}, ${it.color}, ${it.imageUrl},
+            ${it.quantity}, ${it.unitPriceCents}, ${it.lineTotalCents}, ${it.currency},
+            NOW()
+          )`);
         }
 
         // Decrement inventory and bump sales for each line. The CHECK
         // constraint `products_stock_nonneg` prevents stock going below
         // zero — a concurrent decrement that races us aborts the tx.
         for (const it of itemRows) {
-          queries.push(
-            tx`UPDATE products
-                SET stock = stock - ${it.quantity},
-                    sales_count = sales_count + ${it.quantity},
-                    updated_at = NOW()
-              WHERE id = ${it.productId}`,
-          );
+          await tx.execute(sql`UPDATE products
+              SET stock = stock - ${it.quantity},
+                  sales_count = sales_count + ${it.quantity},
+                  updated_at = NOW()
+            WHERE id = ${it.productId}`);
         }
 
         // Bump the discount code's usage counter, if applicable. The
         // CHECK constraint `discount_codes_usage_within_limit` aborts
         // the tx if the increment would exceed `usage_limit`.
         if (data.discount) {
-          queries.push(
-            tx`UPDATE discount_codes
-                SET usage_count = usage_count + 1,
-                    updated_at = NOW()
-              WHERE id = ${data.discount.id}`,
-          );
+          await tx.execute(sql`UPDATE discount_codes
+              SET usage_count = usage_count + 1,
+                  updated_at = NOW()
+            WHERE id = ${data.discount.id}`);
         }
 
         // Clear the user's cart.
-        queries.push(
-          tx`DELETE FROM cart_items WHERE user_id = ${input.userId}`,
+        await tx.execute(
+          sql`DELETE FROM cart_items WHERE user_id = ${input.userId}`,
         );
-
-        return queries;
       },
-      { isolationLevel: "Serializable" },
+      { isolationLevel: "serializable" },
     );
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);

@@ -38,7 +38,7 @@
  * is intentionally a poor man's cache, NOT a redis-backed store; the
  * admin analytics surface tolerates eventual consistency.
  */
-import { and, desc, eq, gte, lte, ne, sql } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, lte, ne, sql } from "drizzle-orm";
 
 import { db } from "@/lib/db";
 import {
@@ -503,7 +503,7 @@ export async function getTopProducts(
       })
       .from(products)
       .leftJoin(productImages, eq(productImages.productId, products.id))
-      .where(sql`${products.id} = any(${productIds})`);
+      .where(inArray(products.id, productIds));
 
     // Pick the lowest-position image per product.
     const best = new Map<

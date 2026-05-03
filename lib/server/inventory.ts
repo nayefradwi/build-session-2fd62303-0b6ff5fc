@@ -24,17 +24,16 @@
  *     are surfaced with `inStock: false` and `outOfStock: true` in the
  *     response payloads so admin UIs can highlight them.
  *
- * Concurrency: the Neon HTTP driver does not expose interactive
- * transactions, but the underlying `neonSql` tag exposes a batched
- * transaction. The "set absolute stock + log" combo runs as a single
- * batch so an aborted UPDATE never leaves an orphan log row. Bulk
- * updates run each line in its own batch (rather than a single mega-tx)
- * so a single bad line returns a per-line error instead of failing the
- * whole call — matching the bulk semantics most admin UIs expect.
+ * Concurrency: the "set absolute stock + log" combo runs inside a single
+ * Drizzle transaction so an aborted UPDATE never leaves an orphan log
+ * row. Bulk updates run each line in its own transaction (rather than a
+ * single mega-tx) so a single bad line returns a per-line error instead
+ * of failing the whole call — matching the bulk semantics most admin
+ * UIs expect.
  */
 import { and, asc, desc, eq, ilike, inArray, lte, or, sql } from "drizzle-orm";
 
-import { db, neonSql } from "@/lib/db";
+import { db } from "@/lib/db";
 import {
   appConfig,
   categories,
@@ -913,5 +912,3 @@ export async function listStockAdjustments(
   };
 }
 
-/** Re-export helpers consumed by the route layer. */
-export { neonSql };

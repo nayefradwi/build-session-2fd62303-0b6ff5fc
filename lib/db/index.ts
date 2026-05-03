@@ -1,28 +1,27 @@
-import { neon } from "@neondatabase/serverless";
-import { drizzle } from "drizzle-orm/neon-http";
+import { Pool } from "pg";
+import { drizzle } from "drizzle-orm/node-postgres";
 
 import * as schema from "./schema";
 import { env } from "@/lib/server/env";
 
 /**
- * Drizzle client wired to Neon over HTTP. The HTTP driver is the right
- * choice for serverless route handlers — it does not require connection
- * pooling and works on the Edge runtime if we ever opt in.
+ * Drizzle client wired to a standard Postgres instance via node-postgres.
+ * Cache the pool on globalThis in dev so Next.js HMR doesn't leak pools.
  *
  * Import as `import { db } from "@/lib/db"`.
+ *
+ * Use `db.transaction(async (tx) => { ... }, { isolationLevel: "serializable" })`
+ * for atomic multi-statement work — the node-postgres adapter supports
+ * interactive transactions natively.
  */
-const sql = neon(env.DATABASE_URL);
+const globalForDb = globalThis as unknown as { pool?: Pool };
 
-export const db = drizzle(sql, { schema });
+const pool =
+  globalForDb.pool ?? new Pool({ connectionString: env.DATABASE_URL });
 
-/**
- * Raw Neon HTTP SQL tag. The drizzle wrapper does NOT expose a working
- * `db.transaction()` for the HTTP driver (it throws); for code paths that
- * genuinely need a batched/atomic transaction with a custom isolation
- * level, use `neonSql.transaction([...queries], { isolationLevel: ... })`
- * directly. Order creation (POST /api/orders) is the canonical example.
- */
-export const neonSql = sql;
+if (process.env.NODE_ENV !== "production") globalForDb.pool = pool;
+
+export const db = drizzle(pool, { schema });
 
 export { schema };
 export * from "./schema";
